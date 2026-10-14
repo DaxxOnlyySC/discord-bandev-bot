@@ -1,28 +1,28 @@
 # Discord Bandev Bot
 
 Discord bot for Mini World **`!bandev`** — **immediate execution** with an
-**automatic 5-minute repeat** for the whole duration.
+**automatic 3-minute repeat** for the whole duration.
 
 ## How it works
 
 `bandev.daxterrantares.workers.dev/?bandev=<UID>` bans the target device for
-about **5 minutes** per call. So when you run a duration command, the bot:
+about **3 minutes** per call. So when you run a duration command, the bot:
 
 1. Fires the **first** request immediately.
-2. Re-fires the **same UID every 5 minutes** (local scheduler).
+2. Re-fires the **same UID every 3 minutes** (local scheduler).
 3. Stops automatically when the duration ends.
 
 Example — `!bandev 1000 1day`:
-- Fire #1 right away → device banned ~5 min.
-- Fire #2 at +5 min → banned another ~5 min.
-- …keeps repeating every 5 min… → total **24 hours**.
+- Fire #1 right away → device banned ~3 min.
+- Fire #2 at +3 min → banned another ~3 min.
+- …keeps repeating every 3 min… → total **24 hours**.
 - At +24h the bot stops re-firing on its own.
 
 `1day` = 24h, `7days` = 7 days, `5m` / `2hours` also work.
 
 ## Commands (all public, all replies are embeds)
 
-- `!bandev <UID> [duration]` — ban a UID (fires now, repeats every 5 min until duration ends).
+- `!bandev <UID> [duration]` — ban a UID (fires now, repeats every 3 min until duration ends).
 - `!unban <UID>` — stop an active ban.
 - `!bandevlist` — list active bans.
 - `!debug` — scheduler status (uptime, next fire time).
@@ -36,10 +36,10 @@ player name) every time someone uses `!bandev`.
 
 - The schedule is kept **in-process** (`data/bans.json`). If the process restarts
   / redeploys, active duration schedules are lost (just re-run the command).
-- `!unban` stops the repeats going forward. Each already-fired request's ~5 min
+- `!unban` stops the repeats going forward. Each already-fired request's ~3 min
   effect simply wears off on its own.
 - This is the *join-room / device-ban* action — the target can still log in;
-  the repeat keeps re-applying the ~5 min ban for the duration.
+  the repeat keeps re-applying the ~3 min ban for the duration.
 
 ## Setup
 

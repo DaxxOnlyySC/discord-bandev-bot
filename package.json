@@ -1,7 +1,7 @@
 {
   "name": "discord-bandev-bot",
   "version": "2.0.0",
-  "description": "Discord bot for Mini World !bandev — immediate execution with automatic 5-min repeats",
+  "description": "Discord bot for Mini World !bandev — immediate execution with automatic 3-min repeats",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"

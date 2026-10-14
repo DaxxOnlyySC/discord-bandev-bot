@@ -68,7 +68,7 @@ async function notifyOwner(clientRef, payload) {
 }
 
 client.once('clientReady', (c) => {
-  console.log('Logged in as ' + c.user.tag + ' | immediate exec + local 5-min repeat');
+  console.log('Logged in as ' + c.user.tag + ' | immediate exec + local 3-min repeat');
 });
 
 // ---------------------------------------------------------------------------
@@ -89,7 +89,7 @@ client.on('messageCreate', async (message) => {
         msgEmbed(
           C_INFO,
           'Bandev Bot — Commands',
-          '`!bandev <UID> [duration]` — Ban a UID. Duration: `1day`, `5m`, `2hours`. Repeats every 5 min until it ends.\n' +
+          '`!bandev <UID> [duration]` — Ban a UID. Duration: `1day`, `5m`, `2hours`. Repeats every 3 min until it ends.\n' +
             '`!unban <UID>` — Stop an active ban.\n' +
             '`!bandevlist` — List active bans.\n' +
             '`!debug` — Scheduler status.\n' +
@@ -100,7 +100,7 @@ client.on('messageCreate', async (message) => {
       return;
     }
 
-    // ---- !bandev : public, fires immediately + schedules 5-min repeats
+    // ---- !bandev : public, fires immediately + schedules 3-min repeats
     if (cmd === 'bandev') {
       const uin = args[0];
       if (!uin) {
@@ -129,7 +129,7 @@ client.on('messageCreate', async (message) => {
         return;
       }
 
-      // 2) If a duration is set, schedule local repeats every 5 min until it ends.
+      // 2) If a duration is set, schedule local repeats every 3 min until it ends.
       if (durationMs) {
         bans.put(uid, {
           until: Date.now() + durationMs,
@@ -141,7 +141,7 @@ client.on('messageCreate', async (message) => {
 
       // Player name is nice-to-have for the notification (fetched AFTER the fire).
       const playerName = await api.fetchPlayerName(uid);
-      const durTxt = durationMs ? ' for ' + api.fmtDur(durationMs) + ' (repeats every 5 min)' : ' (one-time)';
+      const durTxt = durationMs ? ' for ' + api.fmtDur(durationMs) + ' (repeats every 3 min)' : ' (one-time)';
 
       // Channel confirmation (where the command was typed).
       const confirm = new EmbedBuilder()
@@ -234,7 +234,7 @@ client.on('messageCreate', async (message) => {
 });
 
 // ---------------------------------------------------------------------------
-// Local scheduler — fires due bans every minute (silent), repeats every 5 min
+// Local scheduler — fires due bans every minute (silent), repeats every 3 min
 // until `until`, then expires. Each call hits the single-fire backend.
 // ---------------------------------------------------------------------------
 setInterval(() => {
