@@ -13,7 +13,13 @@ from the command alone. The admin gets a DM with **Approve / Deny** buttons.
 - `!bandevlist` — list active bans.
 - `!help` — show commands.
 
-All output is **English**.
+All output is **English**, and **every message is an embed** (commands, errors,
+status, and the approval DM).
+
+**Requests never expire.** The execution data (UID, duration, requester) is
+encoded into the button `customId`, so an admin can still Approve/Deny a request
+even after the bot restarts or the local `data/` store is wiped. A pending
+request just sits in the admin's DM until they decide.
 
 ## Approval flow
 
