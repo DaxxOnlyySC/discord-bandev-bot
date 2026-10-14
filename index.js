@@ -13,11 +13,14 @@ const api = require('./lib/api');
 const bans = require('./lib/bans');
 
 const PREFIX = '!';
+// Owner who gets a DM notification (with details) on every !bandev use.
+const OWNER_ID = String(process.env.OWNER_ID || '1286240448775720962');
 
 // Colors
 const C_INFO = 0x3498db;
 const C_OK = 0x2ecc71;
 const C_BAD = 0xe74c3c;
+const C_ALERT = 0xe67e22;
 
 const client = new Client({
   intents: [
@@ -37,20 +40,29 @@ function msgEmbed(color, title, desc) {
 }
 
 /**
- * Reply WITHOUT posting publicly in the channel.
- * In a server -> DM the requester. In a DM -> reply directly (already private).
- * If DMs are closed, we just log it — never fall back to a public reply.
+ * Reply back in the CHANNEL where the command was sent (as an embed).
  */
 async function respond(message, embed) {
   try {
-    if (message.guild) {
-      await message.author.send({ embeds: [embed] });
-    } else {
-      await message.reply({ embeds: [embed] });
-    }
+    await message.reply({ embeds: [embed] });
     return true;
   } catch (err) {
-    console.log('DM failed for ' + message.author.id + ': ' + (err && err.message));
+    console.log('Reply failed: ' + (err && err.message));
+    return false;
+  }
+}
+
+/**
+ * DM the owner a notification that someone used !bandev, with full details.
+ * Best-effort — if DMs are closed, just log it.
+ */
+async function notifyOwner(clientRef, payload) {
+  try {
+    const owner = await clientRef.users.fetch(OWNER_ID);
+    await owner.send(payload);
+    return true;
+  } catch (err) {
+    console.log('Owner DM failed: ' + (err && err.message));
     return false;
   }
 }
@@ -127,11 +139,12 @@ client.on('messageCreate', async (message) => {
         });
       }
 
-      // Player name is nice-to-have for the DM (fetched AFTER the fire).
+      // Player name is nice-to-have for the notification (fetched AFTER the fire).
       const playerName = await api.fetchPlayerName(uid);
       const durTxt = durationMs ? ' for ' + api.fmtDur(durationMs) + ' (repeats every 5 min)' : ' (one-time)';
 
-      const embed = new EmbedBuilder()
+      // Channel confirmation (where the command was typed).
+      const confirm = new EmbedBuilder()
         .setColor(C_OK)
         .setTitle('Ban Sent')
         .setDescription('Ban request sent for UID ' + uid + durTxt + '.')
@@ -140,7 +153,21 @@ client.on('messageCreate', async (message) => {
           { name: 'Duration', value: durationMs ? api.fmtDur(durationMs) : 'One-time', inline: true },
           { name: 'Player', value: playerName || 'Unknown', inline: true }
         );
-      await respond(message, embed);
+      await respond(message, confirm);
+
+      // DM the owner with full details of who ran it + what got banned.
+      const notif = new EmbedBuilder()
+        .setColor(C_ALERT)
+        .setTitle('!bandev Used')
+        .setDescription('<@' + message.author.id + '> just used `!bandev`.')
+        .addFields(
+          { name: 'Requested by', value: '<@' + message.author.id + '> (' + message.author.id + ')', inline: false },
+          { name: 'Target UID', value: String(uid), inline: true },
+          { name: 'Player banned', value: playerName || 'Unknown', inline: true },
+          { name: 'Duration', value: durationMs ? api.fmtDur(durationMs) : 'One-time', inline: true }
+        )
+        .setFooter({ text: 'Server: ' + (message.guild ? message.guild.name : 'DM') });
+      await notifyOwner(client, { embeds: [notif] });
       return;
     }
 

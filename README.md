@@ -28,8 +28,9 @@ Example — `!bandev 1000 1day`:
 - `!debug` — scheduler status (uptime, next fire time).
 - `!help` — show commands.
 
-**No public replies.** Every response is sent via **DM** to whoever ran the
-command — nothing is posted in the channel.
+**Replies go back in the channel** where the command was typed. In addition, the
+**owner** gets a **DM notification** with full details (who ran it, target UID,
+player name) every time someone uses `!bandev`.
 
 ## Caveats
 
@@ -65,6 +66,7 @@ server with the bot) or the confirmation DM can't be delivered.
 | Key | Description |
 | --- | --- |
 | `DISCORD_TOKEN` | Bot token from the Developer Portal. |
+| `OWNER_ID` | Owner who gets a DM notification on every `!bandev` (default `1286240448775720962`). |
 | `BANDEV_API_URL` | Single-fire ban backend (`?bandev=<UID>`). |
 | `BASEINFO_V1_API_URL` | Player-name lookup (`?uid=<UID>`). |
 
