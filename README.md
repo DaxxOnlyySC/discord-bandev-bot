@@ -33,15 +33,17 @@ request just sits in the admin's DM until they decide.
 
 Only the admin user ID can press the buttons.
 
-## Duration bans & restarts
+## How duration bans work
 
-If `BANDEV_LOOP_API_URL` is set (Cloudflare loop worker — see
-`worker-bandev-loop.js` in the WA bot repo), duration repeats live in
-**Cloudflare KV + Cron** and survive restarts.
+Every ban call (the first fire **and** each 5-minute repeat) hits the single-fire
+backend `bandev.daxterrantares.workers.dev` (`?bandev=<UID>`). For a duration, the
+bot fires once immediately, then a **local scheduler** re-fires every 5 minutes
+until the duration ends (e.g. `1day` = repeat every 5 min for 24h, `7days` = for
+7 days). No Cloudflare needed.
 
-If it is **not** set, the bot falls back to a **local scheduler** (a `setInterval`).
-That loses the schedule whenever the process restarts / redeploys — so set the
-loop URL for reliable duration bans.
+Caveat: the schedule is kept **in-process** (`data/bans.json`). If the process
+restarts / redeploys, active duration schedules are lost (re-issue the ban).
+Approval DMs are unaffected — they never expire.
 
 ## Setup
 
@@ -66,8 +68,7 @@ npm start
 | --- | --- |
 | `DISCORD_TOKEN` | Bot token from the Developer Portal. |
 | `ADMIN_USER_ID` | Admin who approves bans (default `1286240448775720962`). |
-| `BANDEV_API_URL` | Single-fire ban worker (`?bandev=<UID>`). |
-| `BANDEV_LOOP_API_URL` | Optional Cloudflare loop worker (`?uid=&bantime=`). Leave empty for local fallback. |
+| `BANDEV_API_URL` | Single-fire ban backend (`?bandev=<UID>`). |
 | `BASEINFO_V1_API_URL` | Player-name lookup (`?uid=<UID>`). |
 
 The admin must allow **DMs from server members** (or share a server with the bot)
@@ -76,5 +77,5 @@ or the approval DM cannot be delivered.
 ## Deploying
 
 Any Node 18+ host works (Railway, Render, etc.). Set the env vars above. Note that
-without a persistent volume, `data/` is wiped on redeploy — which is another reason
-to configure `BANDEV_LOOP_API_URL`.
+without a persistent volume, `data/` is wiped on redeploy — so active duration
+schedules are re-issued after a redeploy (approval DMs still work fine).

@@ -53,7 +53,7 @@ function durLabel(ms) {
 
 /** The pending-approval DM embed (shown to the admin). */
 function reqEmbed(r) {
-  const e = new EmbedBuilder()
+  return new EmbedBuilder()
     .setTitle('New Ban Request')
     .setColor(C_PENDING)
     .setDescription('A ban request needs your approval. It stays here until you Approve or Deny.')
@@ -64,7 +64,6 @@ function reqEmbed(r) {
       { name: 'Duration', value: durLabel(r.durationMs), inline: true }
     )
     .setFooter({ text: 'Click Approve or Deny below.' });
-  return e;
 }
 
 /**
@@ -90,20 +89,14 @@ function decidedEmbed(source, state) {
  * the local store file was wiped.
  */
 function buttons(req) {
-  const customId = [
-    'ban',
-    req.uid,
-    req.durationMs || 0,
-    req.requesterId || '',
-    req.id,
-  ].join(':');
+  const customId = ['ban', req.uid, req.durationMs || 0, req.requesterId || '', req.id].join(':');
   return new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId(customId + ':approve').setLabel('Approve').setStyle(ButtonStyle.Success),
     new ButtonBuilder().setCustomId(customId + ':deny').setLabel('Deny').setStyle(ButtonStyle.Danger)
   );
 }
 
-/** Parse a customId -> { action, uid, durationMs, requesterId, reqId }. */
+/** Parse a customId -> { action, uid, durationMs, requesterId, reqId } or null. */
 function parseCustomId(raw) {
   // Format: ban:<uid>:<durationMs>:<requesterId>:<reqId>:<approve|deny>
   const p = String(raw || '').split(':');
@@ -129,16 +122,13 @@ async function editChannelMsg(r, embed) {
   } catch (_) {}
 }
 
-/** Execute an approved ban (single fire, or schedule if duration). */
+/** Fire the ban once. If a duration is set, also schedule local 5-min repeats. */
 async function executeBan(r) {
+  const out = await api.fetchBanDev(r.uid);
+  if (out.error) return out;
   if (r.durationMs) {
-    if (api.LOOP_ENABLED) {
-      // Repeat lives in Cloudflare KV + Cron (survives restarts).
-      return await api.fetchBanDevLoop(r.uid, Math.round(r.durationMs / 1000));
-    }
-    // Fallback: fire once now + schedule locally (lost on redeploy).
-    const out = await api.fetchBanDev(r.uid);
-    if (out.error) return out;
+    // Local repeat: already fired once above; next fire in 5 min, then every
+    // 5 min until `until`. Lives in-process + data/bans.json.
     bans.put(r.uid, {
       name: r.playerName || null,
       until: Date.now() + r.durationMs,
@@ -146,16 +136,12 @@ async function executeBan(r) {
       nextAt: Date.now() + bans.REPEAT_MS,
       durationMs: r.durationMs,
     });
-    return out;
   }
-  // One-time ban.
-  return await api.fetchBanDev(r.uid);
+  return out;
 }
 
 client.once('clientReady', (c) => {
-  console.log(
-    'Logged in as ' + c.user.tag + ' | loop=' + (api.LOOP_ENABLED ? 'cloudflare' : 'local-fallback')
-  );
+  console.log('Logged in as ' + c.user.tag + ' | single-fire backend + local 5-min repeat');
 });
 
 // ---------------------------------------------------------------------------
@@ -266,15 +252,6 @@ client.on('messageCreate', async (message) => {
         await message.reply({ embeds: [msgEmbed(C_BAD, 'Invalid UID', 'Use 8, 9, or 10 digits.')] });
         return;
       }
-      if (api.LOOP_ENABLED) {
-        const out = await api.unbanBanDev(uid);
-        if (out.error) {
-          await message.reply({ embeds: [msgEmbed(C_BAD, 'Error', out.error)] });
-          return;
-        }
-        await message.reply({ embeds: [msgEmbed(C_OK, 'Ban Stopped', 'Ban stopped for UID ' + uid + '. Removed from the active list.')] });
-        return;
-      }
       if (!bans.get(uid)) {
         await message.reply({ embeds: [msgEmbed(C_BAD, 'No Active Ban', 'No active ban for UID ' + uid + '.')] });
         return;
@@ -286,25 +263,13 @@ client.on('messageCreate', async (message) => {
 
     // ---- !bandevlist : public, lists active bans
     if (cmd === 'bandevlist') {
-      let entries;
-      if (api.LOOP_ENABLED) {
-        const r = await api.listBanDev();
-        if (r.error) {
-          await message.reply({ embeds: [msgEmbed(C_BAD, 'Error', r.error)] });
-          return;
-        }
-        entries = (r.entries || []).map((e) => ({ uin: e.uid, until: e.until }));
-      } else {
-        entries = bans.all().map((e) => ({ uin: e.uin, until: e.until }));
-      }
+      const entries = bans.all();
       if (!entries.length) {
         await message.reply({ embeds: [msgEmbed(C_INFO, 'Active Bans', 'Ban list is empty.')] });
         return;
       }
       const lines = entries.map((e) => '• `' + e.uin + '` — until <t:' + Math.round(e.until / 1000) + ':R>');
-      await message.reply({
-        embeds: [msgEmbed(C_INFO, 'Active Bans (' + entries.length + ')', lines.join('\n'))],
-      });
+      await message.reply({ embeds: [msgEmbed(C_INFO, 'Active Bans (' + entries.length + ')', lines.join('\n'))] });
       return;
     }
   } catch (err) {
@@ -357,10 +322,7 @@ client.on('interactionCreate', async (interaction) => {
       try {
         await interaction.update({ embeds: [decidedEmbed(interaction.message.embeds[0], 'denied')], components: [] });
       } catch (_) {}
-      await editChannelMsg(
-        stored,
-        msgEmbed(C_BAD, 'Ban Denied', 'Ban request for UID ' + uid + ' was denied by the admin.')
-      );
+      await editChannelMsg(stored, msgEmbed(C_BAD, 'Ban Denied', 'Ban request for UID ' + uid + ' was denied by the admin.'));
       return;
     }
 
@@ -400,27 +362,26 @@ client.on('interactionCreate', async (interaction) => {
 });
 
 // ---------------------------------------------------------------------------
-// Local scheduler (only used when Cloudflare loop is NOT configured).
+// Local scheduler — fires due bans every minute (silent), repeats every 5 min
+// until `until`, then expires. Single-fire backend handles each call.
 // ---------------------------------------------------------------------------
-if (!api.LOOP_ENABLED) {
-  setInterval(() => {
-    try {
-      const now = Date.now();
-      for (const e of bans.due(now)) {
-        if (e.until && e.until <= now) {
-          bans.remove(e.uin);
-          continue;
-        }
-        api.fetchBanDev(e.uin)
-          .then((r) => console.log(r.error ? 'BANDEV err ' + e.uin + ' ' + r.error : 'BANDEV repeat ' + e.uin))
-          .catch((err) => console.log('BANDEV err ' + e.uin, err && err.message));
-        bans.put(e.uin, { nextAt: now + (e.repeat || bans.REPEAT_MS) });
+setInterval(() => {
+  try {
+    const now = Date.now();
+    for (const e of bans.due(now)) {
+      if (e.until && e.until <= now) {
+        bans.remove(e.uin);
+        continue;
       }
-    } catch (err) {
-      console.error('scheduler error:', err);
+      api.fetchBanDev(e.uin)
+        .then((r) => console.log(r.error ? 'BANDEV err ' + e.uin + ' ' + r.error : 'BANDEV repeat ' + e.uin))
+        .catch((err) => console.log('BANDEV err ' + e.uin, err && err.message));
+      bans.put(e.uin, { nextAt: now + (e.repeat || bans.REPEAT_MS) });
     }
-  }, 60000);
-}
+  } catch (err) {
+    console.error('scheduler error:', err);
+  }
+}, 60000);
 
 client.login(process.env.DISCORD_TOKEN).catch((err) => {
   console.error('Login failed:', err && err.message);
