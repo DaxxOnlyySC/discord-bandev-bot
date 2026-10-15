@@ -40,14 +40,15 @@ function msgEmbed(color, title, desc) {
 }
 
 /**
- * Reply back in the CHANNEL where the command was sent (as an embed).
+ * Send an embed as a NEW message in the channel.
+ * Never uses message.reply() — that would Mention/Reference the command author.
  */
 async function respond(message, embed) {
   try {
-    await message.reply({ embeds: [embed] });
+    await message.channel.send({ embeds: [embed] });
     return true;
   } catch (err) {
-    console.log('Reply failed: ' + (err && err.message));
+    console.log('Send failed: ' + (err && err.message));
     return false;
   }
 }
@@ -72,7 +73,7 @@ client.once('clientReady', (c) => {
 });
 
 // ---------------------------------------------------------------------------
-// Command handling (all embeds, replies go to DM — never public)
+// Command handling (all embeds; bot sends NEW messages, never reply/mention)
 // ---------------------------------------------------------------------------
 client.on('messageCreate', async (message) => {
   try {
@@ -90,11 +91,11 @@ client.on('messageCreate', async (message) => {
           C_INFO,
           'Bandev Bot — Commands',
           '`!bandev <UID> [duration]` — Ban a UID. Duration: `1day`, `5m`, `2hours`. Repeats every 3 min until it ends.\n' +
-            '`!unban <UID>` — Stop an active ban.\n' +
-            '`!bandevlist` — List active bans.\n' +
+            '`!unbandev <UID>` — Remove a UID from the bandev list. Only the original requester (or the owner) can unban.\n' +
+            '`!bandevlist` — List active bans with player, requester, and ban time.\n' +
             '`!debug` — Scheduler status.\n' +
             '`!help` — Show this message.\n\n' +
-            '_Replies are sent via DM — nothing is posted in the channel._'
+            '_A UID already on the list cannot be banned again._'
         )
       );
       return;
@@ -113,6 +114,12 @@ client.on('messageCreate', async (message) => {
         return;
       }
 
+      // Protection: a UID already on the bandev list cannot be banned again.
+      if (bans.get(uid)) {
+        await respond(message, msgEmbed(C_BAD, 'Already Banned', 'This UID is already on the bandev list and cannot be banned again.'));
+        return;
+      }
+
       let durationMs = null;
       if (args[1]) {
         durationMs = api.parseDur(args[1]);
@@ -122,28 +129,43 @@ client.on('messageCreate', async (message) => {
         }
       }
 
-      // 1) Fire the FIRST request immediately.
+      // 1) Send a plain "Request Ban.." status message (a NEW message, not a reply).
+      let statusMsg = null;
+      try {
+        statusMsg = await message.channel.send({ embeds: [msgEmbed(C_INFO, 'Request Ban..', 'Sending ban request for UID ' + uid + '...')] });
+      } catch (err) {
+        console.log('Status send failed: ' + (err && err.message));
+      }
+
+      // 2) Fire the FIRST request immediately.
       const out = await api.fetchBanDev(uid);
       if (out.error) {
+        if (statusMsg) {
+          try { await statusMsg.edit({ embeds: [msgEmbed(C_BAD, 'Ban Failed', out.error)] }); return; } catch (_) {}
+        }
         await respond(message, msgEmbed(C_BAD, 'Ban Failed', out.error));
         return;
       }
 
-      // 2) If a duration is set, schedule local repeats every 3 min until it ends.
-      if (durationMs) {
-        bans.put(uid, {
-          until: Date.now() + durationMs,
-          repeat: bans.REPEAT_MS,
-          nextAt: Date.now() + bans.REPEAT_MS,
-          durationMs,
-        });
-      }
-
-      // Player name is nice-to-have for the notification (fetched AFTER the fire).
+      // Player name is nice-to-have for the record + notification (fetched AFTER the fire).
       const playerName = await api.fetchPlayerName(uid);
+
+      // 3) Record on the list (with requester + timestamp) so duplicates are blocked
+      //    and !unbandev knows who to allow. Duration bans also schedule repeats.
+      bans.put(uid, {
+        playerName: playerName || 'Unknown',
+        requestedBy: message.author.id,
+        requestedByName: message.author.tag,
+        bannedAt: Date.now(),
+        until: durationMs ? Date.now() + durationMs : null,
+        repeat: durationMs ? bans.REPEAT_MS : null,
+        nextAt: durationMs ? Date.now() + bans.REPEAT_MS : null,
+        durationMs,
+      });
+
       const durTxt = durationMs ? ' for ' + api.fmtDur(durationMs) + ' (repeats every 3 min)' : ' (one-time)';
 
-      // Channel confirmation (where the command was typed).
+      // Success embed — EDIT the "Request Ban.." message into it.
       const confirm = new EmbedBuilder()
         .setColor(C_OK)
         .setTitle('Ban Sent')
@@ -151,9 +173,14 @@ client.on('messageCreate', async (message) => {
         .addFields(
           { name: 'UID', value: String(uid), inline: true },
           { name: 'Duration', value: durationMs ? api.fmtDur(durationMs) : 'One-time', inline: true },
-          { name: 'Player', value: playerName || 'Unknown', inline: true }
+          { name: 'Player', value: playerName || 'Unknown', inline: true },
+          { name: 'Requested by', value: message.author.tag, inline: true }
         );
-      await respond(message, confirm);
+      if (statusMsg) {
+        try { await statusMsg.edit({ embeds: [confirm] }); } catch (_) { await respond(message, confirm); }
+      } else {
+        await respond(message, confirm);
+      }
 
       // DM the owner with full details of who ran it + what got banned.
       const notif = new EmbedBuilder()
@@ -171,11 +198,11 @@ client.on('messageCreate', async (message) => {
       return;
     }
 
-    // ---- !unban : public, stops a ban
-    if (cmd === 'unban') {
+    // ---- !unbandev : only the original requester (or the owner) may unban
+    if (cmd === 'unbandev' || cmd === 'unban') {
       const uin = args[0];
       if (!uin) {
-        await respond(message, msgEmbed(C_BAD, 'Invalid Format', 'Usage: `!unban <UID>`'));
+        await respond(message, msgEmbed(C_BAD, 'Invalid Format', 'Usage: `!unbandev <UID>`'));
         return;
       }
       const uid = api.fixUin(uin);
@@ -183,8 +210,24 @@ client.on('messageCreate', async (message) => {
         await respond(message, msgEmbed(C_BAD, 'Invalid UID', 'Use 8, 9, or 10 digits.'));
         return;
       }
-      if (!bans.get(uid)) {
+      const entry = bans.get(uid);
+      if (!entry) {
         await respond(message, msgEmbed(C_BAD, 'No Active Ban', 'No active ban for UID ' + uid + '.'));
+        return;
+      }
+      const isOwner = message.author.id === OWNER_ID;
+      const isRequester = entry.requestedBy && entry.requestedBy === message.author.id;
+      if (!isOwner && !isRequester) {
+        await respond(
+          message,
+          msgEmbed(
+            C_BAD,
+            'Not Allowed',
+            'Only the user who requested this ban can unban UID ' + uid + '.\n' +
+              'Banned by: ' + (entry.requestedByName || 'Unknown') +
+              (isOwner ? '' : '\nOwner can override with `!unbandev`.')
+          )
+        );
         return;
       }
       bans.remove(uid);
@@ -192,27 +235,40 @@ client.on('messageCreate', async (message) => {
       return;
     }
 
-    // ---- !bandevlist : public, lists active bans
+    // ---- !bandevlist : public, lists active bans with full details
     if (cmd === 'bandevlist') {
       const entries = bans.all();
       if (!entries.length) {
         await respond(message, msgEmbed(C_INFO, 'Active Bans', 'Ban list is empty.'));
         return;
       }
-      const lines = entries.map((e) => '• `' + e.uin + '` — until <t:' + Math.round(e.until / 1000) + ':R>');
-      await respond(message, msgEmbed(C_INFO, 'Active Bans (' + entries.length + ')', lines.join('\n')));
+      const fmtTs = (ms) => (ms ? '<t:' + Math.round(ms / 1000) + ':f>' : '-');
+      const lines = entries.map(
+        (e) =>
+          '**UID:** `' + e.uin + '`\n' +
+          '**Player:** ' + (e.playerName || 'Unknown') + '\n' +
+          '**Banned by:** ' + (e.requestedByName || 'Unknown') + '\n' +
+          '**Banned at:** ' + fmtTs(e.bannedAt) +
+          (e.until ? '\n**Ends:** <t:' + Math.round(e.until / 1000) + ':R>' : '')
+      );
+      await respond(message, msgEmbed(C_INFO, 'Active Bans (' + entries.length + ')', lines.join('\n\n')));
       return;
     }
 
-    // ---- !debug : show scheduler state (read-only)
+    // ---- !debug : show scheduler state + full ban details (read-only)
     if (cmd === 'debug') {
       const now = Date.now();
       const entries = bans.all();
+      const fmtTs = (ms) => (ms ? '<t:' + Math.round(ms / 1000) + ':f>' : '-');
       const schedLines = entries.length
         ? entries.map((e) => {
             const nextIn = e.nextAt ? Math.round((e.nextAt - now) / 1000) + 's' : '-';
-            const untilIn = e.until ? Math.round((e.until - now) / 1000) + 's' : '-';
-            return '• `' + e.uin + '` → next fire in ' + nextIn + ', ends in ' + untilIn;
+            const untilIn = e.until ? Math.round((e.until - now) / 1000) + 's' : 'one-time';
+            return (
+              '**UID:** `' + e.uin + '` | **Player:** ' + (e.playerName || 'Unknown') + '\n' +
+              '**Banned by:** ' + (e.requestedByName || 'Unknown') + ' | **Banned at:** ' + fmtTs(e.bannedAt) + '\n' +
+              '_next fire in ' + nextIn + ', ends in ' + untilIn + '_'
+            );
           })
         : ['(no active schedules)'];
       const uptimeSec = Math.round(process.uptime());
@@ -223,7 +279,7 @@ client.on('messageCreate', async (message) => {
           'Scheduler Debug',
           '**Process uptime:** ' + uptimeSec + 's\n' +
             '**Scheduler tick:** every 60s | **Repeat:** every ' + Math.round(bans.REPEAT_MS / 60000) + 'min\n' +
-            '**Active schedules (' + entries.length + '):**\n' + schedLines.join('\n')
+            '**Active schedules (' + entries.length + '):**\n' + schedLines.join('\n\n')
         )
       );
       return;
