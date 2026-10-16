@@ -16,6 +16,10 @@ const PREFIX = '!';
 // Owner who gets a DM notification (with details) on every !bandev use.
 const OWNER_ID = String(process.env.OWNER_ID || '1286240448775720962');
 
+// Retry for "Player not found" (target offline) errors.
+const RETRY_DELAY_MS = 3 * 60 * 1000; // jeda beberapa menit sebelum retry
+const MAX_RETRIES = 5; // give up + DM owner setelah N error beruntun
+
 // Colors
 const C_INFO = 0x3498db;
 const C_OK = 0x2ecc71;
@@ -65,6 +69,68 @@ async function notifyOwner(clientRef, payload) {
   } catch (err) {
     console.log('Owner DM failed: ' + (err && err.message));
     return false;
+  }
+}
+
+/** Embed DM'd to the owner when a ban gives up after MAX_RETRIES "Player not found". */
+function buildGaveUpEmbed(uin, entry, errorMsg, retryCount) {
+  return new EmbedBuilder()
+    .setColor(C_BAD)
+    .setTitle('Ban Gave Up — ' + uin)
+    .setDescription(
+      'Stopped retrying the device ban for UID ' + uin + ' after **' + retryCount +
+        '** consecutive "Player not found" errors.\nThe target is likely offline (the ban API needs them online to target the device).'
+    )
+    .addFields(
+      { name: 'UID', value: String(uin), inline: true },
+      { name: 'Player', value: (entry && entry.playerName) || 'Unknown', inline: true },
+      { name: 'Requested by', value: (entry && entry.requestedByName) || 'Unknown', inline: true },
+      { name: 'Last error', value: String(errorMsg).slice(0, 200), inline: false }
+    )
+    .setFooter({ text: 'Run !unbandev then !bandev to retry once they are online.' });
+}
+
+/**
+ * Record one ban fire's result and schedule the next.
+ *  - success                -> reset retries, normal repeat
+ *  - "Player not found"     -> bounded retry (target offline); give up + DM after MAX_RETRIES
+ *  - other error            -> keep normal repeat (transient)
+ */
+function recordFire(uin, errorMsg, okMsg) {
+  const prev = bans.get(uin);
+  if (!prev) return; // unbanned mid-flight
+  const now = Date.now();
+  const normalNext = now + (prev.repeat || bans.REPEAT_MS);
+
+  if (!errorMsg) {
+    bans.put(uin, { lastFiredAt: now, lastResult: 'OK: ' + (okMsg || 'Done'), retryCount: 0, fireCount: (prev.fireCount || 0) + 1, nextAt: normalNext });
+    console.log('BANDEV repeat ' + uin);
+    return;
+  }
+
+  if (!/player not found/i.test(errorMsg)) {
+    // transient error — keep normal schedule
+    bans.put(uin, { lastFiredAt: now, lastResult: 'ERR: ' + errorMsg, fireCount: (prev.fireCount || 0) + 1, nextAt: normalNext });
+    console.log('BANDEV err ' + uin + ' ' + errorMsg);
+    return;
+  }
+
+  // "Player not found" — target offline. Retry a few times.
+  const retryCount = (prev.retryCount || 0) + 1;
+  const fc = (prev.fireCount || 0) + 1;
+  if (retryCount >= MAX_RETRIES) {
+    bans.put(uin, { lastFiredAt: now, lastResult: 'ERR: ' + errorMsg, retryCount, fireCount: fc, gaveUp: true, repeat: null, nextAt: null });
+    notifyOwner(client, { embeds: [buildGaveUpEmbed(uin, prev, errorMsg, retryCount)] });
+    console.log('BANDEV gave up ' + uin + ' after ' + retryCount + ' retries: ' + errorMsg);
+  } else {
+    bans.put(uin, {
+      lastFiredAt: now,
+      lastResult: 'ERR: ' + errorMsg + ' — retry ' + retryCount + '/' + MAX_RETRIES,
+      retryCount,
+      fireCount: fc,
+      nextAt: now + RETRY_DELAY_MS,
+    });
+    console.log('BANDEV retry ' + uin + ' (' + retryCount + '/' + MAX_RETRIES + ') in ' + Math.round(RETRY_DELAY_MS / 60000) + 'm');
   }
 }
 
@@ -265,13 +331,16 @@ client.on('messageCreate', async (message) => {
       const fmtTs = (ms) => (ms ? '<t:' + Math.round(ms / 1000) + ':f>' : '-');
       const schedLines = entries.length
         ? entries.map((e) => {
-            const nextIn = e.nextAt ? Math.round((e.nextAt - now) / 1000) + 's' : '-';
+            const nextIn = e.gaveUp ? 'stopped — gave up' : (e.nextAt ? Math.round((e.nextAt - now) / 1000) + 's' : '-');
             const untilIn = e.until ? Math.round((e.until - now) / 1000) + 's' : 'one-time';
             const lastFired = e.lastFiredAt ? '<t:' + Math.round(e.lastFiredAt / 1000) + ':R>' : 'never';
             const fires = e.fireCount || 0;
+            const retry = e.gaveUp
+              ? ' ⚠️ **GAVE UP** after ' + (e.retryCount || 0) + ' retries'
+              : (e.retryCount ? ' _(retry ' + e.retryCount + '/' + MAX_RETRIES + ')_' : '');
             const result = e.lastResult ? String(e.lastResult).slice(0, 120) : 'n/a (not yet re-fired)';
             return (
-              '**UID:** `' + e.uin + '` | **Player:** ' + (e.playerName || 'Unknown') + '\n' +
+              '**UID:** `' + e.uin + '` | **Player:** ' + (e.playerName || 'Unknown') + retry + '\n' +
               '**Banned by:** ' + (e.requestedByName || 'Unknown') + ' | **Banned at:** ' + fmtTs(e.bannedAt) + '\n' +
               '**Fires:** ' + fires + ' | **Last fired:** ' + lastFired + '\n' +
               '**Last result:** ' + result + '\n' +
@@ -309,33 +378,12 @@ setInterval(() => {
         bans.remove(e.uin);
         continue;
       }
-      // Bump next fire time first so the scheduler keeps moving even if the
-      // API call below fails — then record the outcome for !debug visibility.
+      // Safety bump so a slow call can't double-fire; recordFire() below
+      // overrides this with the correct next schedule (normal / retry / give-up).
       bans.put(e.uin, { nextAt: now + (e.repeat || bans.REPEAT_MS) });
       api.fetchBanDev(e.uin)
-        .then((r) => {
-          const prev = bans.get(e.uin); // may be null if unbanned mid-flight
-          if (prev) {
-            bans.put(e.uin, {
-              lastFiredAt: Date.now(),
-              lastResult: r.error ? 'ERR: ' + r.error : 'OK: ' + (r.msg || 'Done'),
-              fireCount: (prev.fireCount || 0) + 1,
-            });
-          }
-          console.log(r.error ? 'BANDEV err ' + e.uin + ' ' + r.error : 'BANDEV repeat ' + e.uin);
-        })
-        .catch((err) => {
-          const msg = err && err.message ? err.message : String(err);
-          const prev = bans.get(e.uin); // may be null if unbanned mid-flight
-          if (prev) {
-            bans.put(e.uin, {
-              lastFiredAt: Date.now(),
-              lastResult: 'ERR: ' + msg,
-              fireCount: (prev.fireCount || 0) + 1,
-            });
-          }
-          console.log('BANDEV err ' + e.uin, msg);
-        });
+        .then((r) => recordFire(e.uin, r.error || null, r.msg))
+        .catch((err) => recordFire(e.uin, (err && err.message ? err.message : String(err)), null));
     }
   } catch (err) {
     console.error('scheduler error:', err);
