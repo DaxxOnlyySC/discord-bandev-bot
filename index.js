@@ -90,7 +90,7 @@ client.on('messageCreate', async (message) => {
         msgEmbed(
           C_INFO,
           'Bandev Bot — Commands',
-          '`!bandev <UID> [duration]` — Ban a UID. Duration: `1day`, `5m`, `2hours`. Repeats every 3 min until it ends.\n' +
+          '`!bandev <UID> [duration]` — Ban a UID. Duration: `1day`, `5m`, `2hours`. Repeats every 2 min until it ends.\n' +
             '`!unbandev <UID>` — Remove a UID from the bandev list. Only the original requester (or the owner) can unban.\n' +
             '`!bandevlist` — List active bans with player, requester, and ban time.\n' +
             '`!debug` — Scheduler status.\n' +
@@ -163,7 +163,7 @@ client.on('messageCreate', async (message) => {
         durationMs,
       });
 
-      const durTxt = durationMs ? ' for ' + api.fmtDur(durationMs) + ' (repeats every 3 min)' : ' (one-time)';
+      const durTxt = durationMs ? ' for ' + api.fmtDur(durationMs) + ' (repeats every 2 min)' : ' (one-time)';
 
       // Success embed — EDIT the "Request Ban.." message into it.
       const confirm = new EmbedBuilder()
@@ -290,7 +290,7 @@ client.on('messageCreate', async (message) => {
 });
 
 // ---------------------------------------------------------------------------
-// Local scheduler — fires due bans every minute (silent), repeats every 3 min
+// Local scheduler — fires due bans every minute (silent), repeats every 2 min
 // until `until`, then expires. Each call hits the single-fire backend.
 // ---------------------------------------------------------------------------
 setInterval(() => {
