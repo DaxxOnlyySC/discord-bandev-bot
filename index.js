@@ -161,6 +161,9 @@ client.on('messageCreate', async (message) => {
         repeat: durationMs ? bans.REPEAT_MS : null,
         nextAt: durationMs ? Date.now() + bans.REPEAT_MS : null,
         durationMs,
+        lastFiredAt: Date.now(),
+        lastResult: 'OK: ' + (out.msg || 'Done'),
+        fireCount: 1,
       });
 
       const durTxt = durationMs ? ' for ' + api.fmtDur(durationMs) + ' (repeats every 2 min)' : ' (one-time)';
@@ -264,9 +267,14 @@ client.on('messageCreate', async (message) => {
         ? entries.map((e) => {
             const nextIn = e.nextAt ? Math.round((e.nextAt - now) / 1000) + 's' : '-';
             const untilIn = e.until ? Math.round((e.until - now) / 1000) + 's' : 'one-time';
+            const lastFired = e.lastFiredAt ? '<t:' + Math.round(e.lastFiredAt / 1000) + ':R>' : 'never';
+            const fires = e.fireCount || 0;
+            const result = e.lastResult ? String(e.lastResult).slice(0, 120) : 'n/a (not yet re-fired)';
             return (
               '**UID:** `' + e.uin + '` | **Player:** ' + (e.playerName || 'Unknown') + '\n' +
               '**Banned by:** ' + (e.requestedByName || 'Unknown') + ' | **Banned at:** ' + fmtTs(e.bannedAt) + '\n' +
+              '**Fires:** ' + fires + ' | **Last fired:** ' + lastFired + '\n' +
+              '**Last result:** ' + result + '\n' +
               '_next fire in ' + nextIn + ', ends in ' + untilIn + '_'
             );
           })
@@ -301,10 +309,33 @@ setInterval(() => {
         bans.remove(e.uin);
         continue;
       }
-      api.fetchBanDev(e.uin)
-        .then((r) => console.log(r.error ? 'BANDEV err ' + e.uin + ' ' + r.error : 'BANDEV repeat ' + e.uin))
-        .catch((err) => console.log('BANDEV err ' + e.uin, err && err.message));
+      // Bump next fire time first so the scheduler keeps moving even if the
+      // API call below fails — then record the outcome for !debug visibility.
       bans.put(e.uin, { nextAt: now + (e.repeat || bans.REPEAT_MS) });
+      api.fetchBanDev(e.uin)
+        .then((r) => {
+          const prev = bans.get(e.uin); // may be null if unbanned mid-flight
+          if (prev) {
+            bans.put(e.uin, {
+              lastFiredAt: Date.now(),
+              lastResult: r.error ? 'ERR: ' + r.error : 'OK: ' + (r.msg || 'Done'),
+              fireCount: (prev.fireCount || 0) + 1,
+            });
+          }
+          console.log(r.error ? 'BANDEV err ' + e.uin + ' ' + r.error : 'BANDEV repeat ' + e.uin);
+        })
+        .catch((err) => {
+          const msg = err && err.message ? err.message : String(err);
+          const prev = bans.get(e.uin); // may be null if unbanned mid-flight
+          if (prev) {
+            bans.put(e.uin, {
+              lastFiredAt: Date.now(),
+              lastResult: 'ERR: ' + msg,
+              fireCount: (prev.fireCount || 0) + 1,
+            });
+          }
+          console.log('BANDEV err ' + e.uin, msg);
+        });
     }
   } catch (err) {
     console.error('scheduler error:', err);
