@@ -380,10 +380,6 @@ client.on('messageCreate', async (message) => {
       d.push(L('Country', (flagOf(cc) ? flagOf(cc) + ' ' : '') + V(cc)));
       d.push(L('Gender', GENDER[prof.gender] !== undefined ? GENDER[prof.gender] : V(prof.gender)));
       d.push(L('Creator Level', V(prof.creator && prof.creator.level)));
-      d.push(L('Head Frame', V(prof.head_frame_id)));
-      d.push(L('Total downloads', V(prof.all_download_count)));
-      d.push(L('Avatar skins', V(skins)));
-      d.push(L('Model / Skin', V(role.Model) + ' / ' + V(role.SkinID)));
       d.push(L('Mood', clipT(prof.mood_text, 200)));
       d.push(div);
       d.push(L('Device System', V(extra.DeviceSystem)));
@@ -414,9 +410,8 @@ client.on('messageCreate', async (message) => {
       if (out.avatar) embed.setThumbnail(String(out.avatar).replace(/^http:\/\//i, 'https://'));
       if (mapUrl) embed.setImage(mapUrl);
 
-      if (statusMsg) {
-        try { await statusMsg.edit({ embeds: [embed] }); return; } catch (_) {}
-      }
+      // Drop the loading line, then send the finished card as a fresh message.
+      if (statusMsg) { try { await statusMsg.delete(); } catch (_) {} }
       try { await message.channel.send({ embeds: [embed] }); } catch (_) {}
     }
 
