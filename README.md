@@ -25,6 +25,7 @@ Example — `!bandev 1000 1day`:
 - `!bandev <UID> [duration]` — ban a UID (fires now, repeats every 3 min until duration ends).
 - `!unban <UID>` — stop an active ban.
 - `!bandevlist` — list active bans.
+- `!checkinfo <UID>` — full account info (profile, avatar, device, currency, login, Facebook link).
 - `!debug` — scheduler status (uptime, next fire time).
 - `!help` — show commands.
 

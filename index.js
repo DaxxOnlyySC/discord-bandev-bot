@@ -134,6 +134,127 @@ function recordFire(uin, errorMsg, okMsg) {
   }
 }
 
+// --- !checkinfo helpers -----------------------------------------------------
+const isObj = (o) => !!o && typeof o === 'object' && !Array.isArray(o);
+const GENDER = { 1: 'Male', 2: 'Female', 0: 'Hidden' };
+
+/** Unix seconds -> Discord timestamp; 0/undefined -> "-". */
+function dts(sec, style = 'f') {
+  const n = Number(sec);
+  if (!n) return '-';
+  return '<t:' + Math.floor(n) + ':' + style + '>';
+}
+
+/** LastLoginIP datang sebagai angka32-bit unsigned -> dotted quad. */
+function intToIp(n) {
+  const x = Math.floor(Number(n) || 0) >>> 0;
+  return [(x >>> 24) & 255, (x >>> 16) & 255, (x >>> 8) & 255, x & 255].join('.');
+}
+
+/** Escape karakter markdown Discord (* _ ~ ` | >) biar nickname/mood aman. */
+function esc(s) {
+  return String(s == null ? '' : s).replace(/([*_`~|>\\])/g, '\\$1');
+}
+
+/** Nilai -> teks aman untuk embed. */
+function v(val, dflt = '-') {
+  if (val === undefined || val === null || val === '') return dflt;
+  return esc(String(val));
+}
+
+/**
+ * !checkinfo -> Embed. Data akun lengkap (account, avatar, device, facebook).
+ * Kredensial (auth_pwd, DeviceToken, FB token) TIDAK pernah ditampilkan.
+ */
+function buildInfoEmbed(d) {
+  if (d.error) return msgEmbed(C_BAD, 'Check Info Failed', d.error);
+
+  const x = d.data;
+  const prof = d.prof;
+  const role = d.role;
+  const extra = d.extra;
+  const pRole = isObj(prof.RoleInfo) ? prof.RoleInfo : {};
+  const nick = (role && role.NickName) || (pRole && pRole.NickName) || '-';
+
+  const e = new EmbedBuilder()
+    .setColor(C_INFO)
+    .setTitle('Player Info — ' + esc(nick).slice(0, 180))
+    .setDescription('**UID:** `' + d.uin + '`  •  **Level:** ' + v(x.level) + '  •  **Source:** ' + v(x.source))
+    .addFields(
+      { name: 'Account', value: [
+        '**Nickname:** ' + v(nick),
+        '**Created:** ' + dts(x.CreateTime),
+        '**Last Login:** ' + dts(x.LastLoginTime),
+        '**Login IP:** ' + intToIp(x.LastLoginIP),
+        '**Email:** ' + v(x.Email),
+        '**Phone:** ' + v(x.Phone, '(empty)'),
+        '**Bind:** ' + v(x.bind_country) + ' • ' + dts(x.AccountBindTime),
+      ].join('\n'), inline: false },
+      { name: 'Profile', value: [
+        '**Model / Skin:** ' + v(role && role.Model) + ' / ' + v(role && role.SkinID),
+        '**Gender:** ' + v(GENDER[prof.gender] !== undefined ? GENDER[prof.gender] : prof.gender),
+        '**Country / Lang:** ' + v(prof.country) + ' / ' + v(prof.lang),
+        '**Show Country:** ' + v(prof.show_country !== undefined ? (prof.show_country ? 'Yes' : 'No') : '-'),
+        '**Mood:** ' + v(prof.mood_icon, '') + ' ' + v(prof.mood_text),
+        '**Map Downloads:** ' + v(prof.all_download_count),
+        '**Profile Update:** ' + dts(prof._t_),
+      ].join('\n'), inline: false },
+      { name: 'Avatar', value: [
+        '**Head ID:** ' + v(pRole.head_id) + '  •  **Frame:** ' + v(prof.head_frame_id),
+        '**Has Avatar:** ' + v(pRole.HasAvatar !== undefined ? (pRole.HasAvatar ? 'Yes' : 'No') : '-'),
+        '**Skin Parts:** ' + (Array.isArray(pRole.AvatarSkin) ? pRole.AvatarSkin.length : 0),
+      ].join('\n'), inline: false },
+      { name: 'Currency', value: [
+        '**Mini Bean:** ' + v(x.minibean, '0'),
+        '**Mini Coin:** ' + v(x.minicoin, '0'),
+        '**Coin Total:** ' + v(x.MiniCoinTotal, '0'),
+        '**Uin Flag:** ' + v(x.UinFlag),
+      ].join('\n'), inline: true },
+      { name: 'Status', value: [
+        '**Developer:** ' + v(x.isdeveloper !== undefined ? (x.isdeveloper ? 'Yes' : 'No') : '-'),
+        '**Frozen:** ' + v(x.isfreeze !== undefined ? (x.isfreeze ? 'Yes' : 'No') : '-'),
+        '**ID Card Auth:** ' + v(x.idcard_authed !== undefined ? (x.idcard_authed ? 'Yes' : 'No') : '-'),
+        '**Safe Verify:** ' + v(x.isloginsafeverify !== undefined ? (x.isloginsafeverify ? 'Yes' : 'No') : '-'),
+      ].join('\n'), inline: true },
+      { name: 'Device', value: [
+        '**System:** ' + v(extra.DeviceSystem),
+        '**Vendor:** ' + v(extra.DeviceVender),
+        '**Model:** ' + v(extra.DeviceModel),
+        '**Device ID:** ' + v(extra.DeviceID, '(empty)'),
+        '**Country:** ' + v(extra.Country) + '  •  **Lang:** ' + v(extra.CltLang),
+        '**API / Client:** ' + v(extra.CltApiID) + ' / ' + v(x.cltversion),
+      ].join('\n'), inline: false }
+    );
+
+  // Facebook hanya kalau memang tertaut.
+  const fb = isObj(extra.facebook) ? extra.facebook : null;
+  if (fb) {
+    e.addFields({
+      name: 'Facebook',
+      value: [
+        '**FB ID:** ' + v(fb.id),
+        '**Nickname:** ' + v(fb.nickname),
+        '**Platform:** ' + v(fb.platform) + ' • src: ' + v(fb.src),
+        '_Session token withheld for privacy._',
+      ].join('\n'),
+      inline: false,
+    });
+  }
+
+  const pkg = Array.isArray(x.pkg) ? x.pkg : [];
+  if (pkg.length) {
+    e.addFields({ name: 'Packages (' + pkg.length + ')', value: pkg.map((s) => '`' + esc(s) + '`').join('\n').slice(0, 1000), inline: false });
+  }
+
+  // auth_pwd & DeviceToken adalah kredensial login — tidak pernah ditampilkan.
+  if (x.auth_pwd || extra.DeviceToken) {
+    e.setFooter({ text: 'Credentials (password/token) withheld for privacy.' });
+  }
+
+  if (d.avatar) e.setThumbnail(d.avatar);
+  return e;
+}
+
 client.once('clientReady', (c) => {
   console.log('Logged in as ' + c.user.tag + ' | immediate exec + local 3-min repeat');
 });
@@ -159,12 +280,105 @@ client.on('messageCreate', async (message) => {
           '`!bandev <UID> [duration]` — Ban a UID. Duration: `1day`, `5m`, `2hours`. Repeats every 2 min until it ends.\n' +
             '`!unbandev <UID>` — Remove a UID from the bandev list. Only the original requester (or the owner) can unban.\n' +
             '`!bandevlist` — List active bans with player, requester, and ban time.\n' +
+            '`!checkinfo <UID>` — Full account info: profile, avatar, device, currency, login.\n' +
+            '`!checkinfo <UID>` — Full account info (level, device, login, coins).\n' +
             '`!debug` — Scheduler status.\n' +
             '`!help` — Show this message.\n\n' +
             '_A UID already on the list cannot be banned again._'
         )
       );
       return;
+    }
+
+    // ---- !checkinfo : full account info via the getinfo API (always an embed)
+    if (cmd === 'checkinfo' || cmd === 'getinfo' || cmd === 'info') {
+      const uin = args[0];
+      if (!uin) {
+        await respond(message, msgEmbed(C_BAD, 'Invalid Format', 'Usage: `!checkinfo <UID>`\nExample: `!checkinfo 1320454366`'));
+        return;
+      }
+      const uid = api.fixUin(uin);
+      if (!uid) {
+        await respond(message, msgEmbed(C_BAD, 'Invalid UID', 'Use 8, 9, or 10 digits.'));
+        return;
+      }
+
+      // Loading message — a NEW message, never a reply/mention.
+      let statusMsg = null;
+      try {
+        statusMsg = await message.channel.send({ embeds: [msgEmbed(C_INFO, 'Fetching Info..', 'Loading account info for UID ' + uid + '...')] });
+      } catch (err) {
+        console.log('Status send failed: ' + (err && err.message));
+      }
+      const finish = async (embed) => {
+        if (statusMsg) {
+          try { await statusMsg.edit({ embeds: [embed] }); return; } catch (_) {}
+        }
+        await respond(message, embed);
+      };
+
+      const out = await api.fetchInfo(uid);
+      if (out.error) return await finish(msgEmbed(C_BAD, 'Info Failed', out.error));
+
+      const x = out.data || {};
+      const prof = out.prof || {};
+      const role = out.role || {};
+      const extra = out.extra || {};
+
+      // block-scoped display helpers
+      const dash = (v) => (v === undefined || v === null || v === '' ? '-' : String(v));
+      const yn = (v) => (v === true ? 'Yes' : v === false ? 'No' : dash(v));
+      const clip = (v, n) => { const s = dash(v).replace(/\s+/g, ' '); return s.length > n ? s.slice(0, n - 1) + '…' : s; };
+      const tshow = (v) => { const n = Number(v); return Number.isFinite(n) && n > 0 ? '<t:' + Math.round(n) + ':F>' : '-'; };
+      const ip = (v) => { const n = Number(v); return Number.isFinite(n) && n > 0 ? [(n >>> 24) & 255, (n >>> 16) & 255, (n >>> 8) & 255, n & 255].join('.') : '-'; };
+      const devModel = (v) => {
+        if (v == null || v === '') return '-';
+        const s = String(v).trim();
+        if (s === '[]' || s === '{}' || s === 'null') return '-';
+        try {
+          const j = JSON.parse(s);
+          if (Array.isArray(j)) return j.length ? j.length + ' item(s)' : '-';
+          if (j && typeof j === 'object') { const ks = Object.keys(j); return ks.length ? ks.map((k) => k + '=' + j[k]).join(', ') : '-'; }
+        } catch (_) {}
+        return s;
+      };
+
+      const nick = role.NickName != null && role.NickName !== '' ? role.NickName : prof.NickName;
+      const country = [prof.country, extra.Country, x.bind_country].find((v) => v != null && v !== '') || '-';
+
+      const F = (name, value, inline) => ({ name, value: clip(value, 1024), inline: inline !== false });
+      const fields = [
+        F('UID', '`' + dash(out.uin) + '`'),
+        F('Nickname', nick),
+        F('Country', country),
+        F('Level', dash(x.level)),
+        F('Minicoin', dash(x.minicoin)),
+        F('Beans', dash(x.minibean)),
+        F('Created', tshow(x.CreateTime)),
+        F('Last Login', tshow(x.LastLoginTime)),
+        F('Login IP', ip(x.LastLoginIP)),
+        F('Bind Time', tshow(x.AccountBindTime)),
+        F('Bound To', x.bind && x.bind.uname ? x.bind.uname : '-'),
+        F('Email', x.Email),
+        F('Phone', x.Phone),
+        F('Device System', extra.DeviceSystem),
+        F('Device ID', extra.DeviceID),
+        F('Device Vendor', extra.DeviceVender),
+        F('Device Model', devModel(extra.DeviceModel)),
+        F('Flags', 'Developer: ' + yn(x.isdeveloper) + '  •  Frozen: ' + yn(x.isfreeze) + '  •  ID Card: ' + yn(x.idcard_authed) + '  •  Safe Verify: ' + yn(x.isloginsafeverify), false),
+      ];
+      if (prof.mood_text) fields.push(F('Mood', prof.mood_text, false));
+
+      const embed = new EmbedBuilder()
+        .setColor(C_OK)
+        .setTitle('Account Info — ' + uid)
+        .addFields(fields)
+        .setFooter({ text: 'GetInfo API' })
+        .setTimestamp();
+      // Discord rejects http:// embed images — only set the avatar when it's https.
+      if (out.avatar && /^https:\/\//i.test(out.avatar)) embed.setThumbnail(out.avatar);
+
+      return await finish(embed);
     }
 
     // ---- !bandev : public, fires immediately + schedules 3-min repeats
@@ -321,6 +535,38 @@ client.on('messageCreate', async (message) => {
           (e.until ? '\n**Ends:** <t:' + Math.round(e.until / 1000) + ':R>' : '')
       );
       await respond(message, msgEmbed(C_INFO, 'Active Bans (' + entries.length + ')', lines.join('\n\n')));
+      return;
+    }
+
+    // ---- !checkinfo : full account info via the getinfo API
+    if (cmd === 'checkinfo' || cmd === 'getinfo') {
+      const uin = args[0];
+      if (!uin) {
+        await respond(message, msgEmbed(C_BAD, 'Invalid Format', 'Usage: `!checkinfo <UID>`\nExample: `!checkinfo 1137790884`'));
+        return;
+      }
+      const uid = api.fixUin(uin);
+      if (!uid) {
+        await respond(message, msgEmbed(C_BAD, 'Invalid UID', 'Use 8, 9, or 10 digits.'));
+        return;
+      }
+
+      let statusMsg = null;
+      try {
+        statusMsg = await message.channel.send({ embeds: [msgEmbed(C_INFO, 'Fetching data..', 'Getting account info for UID ' + uid + '...')] });
+      } catch (err) {
+        console.log('Status send failed: ' + (err && err.message));
+      }
+
+      const out = await api.fetchInfo(uid);
+      const embed = buildInfoEmbed(out);
+      if (statusMsg) {
+        try {
+          await statusMsg.edit({ embeds: [embed] });
+          return;
+        } catch (_) {}
+      }
+      await respond(message, embed);
       return;
     }
 
