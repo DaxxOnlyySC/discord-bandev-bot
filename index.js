@@ -339,91 +339,85 @@ client.on('messageCreate', async (message) => {
       const fb = extra.facebook && typeof extra.facebook === 'object' ? extra.facebook : {};
       const skins = Array.isArray(role.AvatarSkin) ? role.AvatarSkin.length : 0;
 
-      const b = [];
-      b.push('**' + clipT(nick, 60) + '**');
-      b.push(div);
-      b.push('**UID:** ' + V(out.uin));
-      b.push('**Status:** ' + (x.isfreeze ? '🔴 Frozen' : '🟢 Normal'));
-      b.push('**Created on:** ' + tsec(x.CreateTime));
-      b.push('**Last online:** ' + tsec(x.LastLoginTime));
-      b.push('**Level:** ' + V(x.level));
-      b.push('**Developer:** ' + yn(x.isdeveloper));
-      b.push('**TotalMiniCoins:** ' + V(x.MiniCoinTotal));
-      b.push('**Current coins:** ' + V(x.minicoin));
-      b.push('**Current beans:** ' + V(x.minibean));
-      b.push(div);
-      b.push('**Nickname:** ' + clipT(nick, 80));
-      b.push('**Username:** ' + V(x.bind && x.bind.uname));
-      b.push('**Facebook:** ' + (fb.nickname ? clipT(fb.nickname, 60) : '-'));
-      b.push('**Email:** ' + V(x.Email));
-      b.push('**Phone:** ' + V(x.Phone));
-      b.push('**Country:** ' + (flagOf(cc) ? flagOf(cc) + ' ' : '') + V(cc));
-      b.push('**Gender:** ' + (GENDER[prof.gender] !== undefined ? GENDER[prof.gender] : V(prof.gender)));
-      b.push('**Head Frame:** ' + V(prof.head_frame_id));
-      b.push('**Total downloads:** ' + V(prof.all_download_count));
-      b.push('**Avatar skins:** ' + V(skins));
-      b.push('**Model / Skin:** ' + V(role.Model) + ' / ' + V(role.SkinID));
-      b.push('**Mood:** ' + clipT(prof.mood_text, 120));
-      b.push(div);
-      b.push('**Device System:** ' + V(extra.DeviceSystem));
-      b.push('**Device ID:** ' + V(extra.DeviceID));
-      b.push('**Device Vendor:** ' + V(extra.DeviceVender));
-      b.push('**ID Card:** ' + yn(x.idcard_authed) + '   **Safe Verify:** ' + yn(x.isloginsafeverify));
-
-      const p1 = b.join('\n');
-      // Turn the loading line into the profile, attaching the avatar when possible.
-      if (statusMsg) {
-        let ok = false;
-        if (out.avatar) {
-          try { const ab = await fetchBuf(out.avatar); await statusMsg.edit({ content: p1, files: [{ attachment: ab, name: 'avatar.png' }] }); ok = true; } catch (_) {}
-        }
-        if (!ok) { try { await statusMsg.edit(p1); ok = true; } catch (_) {} }
-        if (!ok) { try { await message.channel.send(p1); } catch (_) {} }
-      } else {
-        try { await message.channel.send(p1); } catch (_) {}
-      }
-
-      // ---- Location box (approximate, IP-based) + static map image ----
-      // IP geolocation is APPROXIMATE (city centroid), never an exact address.
+      // ---- Location (approximate, IP-based). Fetched BEFORE building the embed
+      // so the map can go inside it via setImage(). Any failure just leaves the
+      // image out — the profile still renders.
+      let geo = null;
+      let loginIp = null;
       try {
-        const loginIp = api.intToIp(x.LastLoginIP);
-        if (!loginIp) return;
-        const geo = await api.fetchIpGeo(loginIp);
-        if (geo.error) return;
-
-        const l = [];
-        l.push(div);
-        l.push('**Last IP:** ' + loginIp);
-        l.push('**IP location:** ' + ([geo.city, geo.region, geo.country].filter(Boolean).join(', ') || '-'));
-        l.push('**ZIP:** ' + V(geo.postal));
-        l.push('**Internet provider:** ' + V(geo.isp));
-        l.push('**Coordinates:** ' + (geo.lat != null && geo.lon != null ? geo.lat + ', ' + geo.lon : '-'));
-        l.push('**Timezone:** ' + V(geo.tz));
-        l.push('**Updated:** ' + new Date().toISOString().slice(0, 19).replace('T', ' '));
-        const p2 = l.join('\n');
-
-        // Mapbox static image (same provider as the site). Needs MAPBOX_TOKEN;
-        // without it the text still goes out, just no picture.
-        const token = String(process.env.MAPBOX_TOKEN || '').trim();
-        if (token && geo.lat != null && geo.lon != null) {
-          const mapUrl =
-            'https://api.mapbox.com/styles/v1/mapbox/streets-v11/static/pin-s+FF0000(' +
-            geo.lon + ',' + geo.lat + ')/' + geo.lon + ',' + geo.lat + ',12/800x500@2x?access_token=' +
-            encodeURIComponent(token);
-          try {
-            const mb = await fetchBuf(mapUrl);
-            await message.channel.send({ content: p2, files: [{ attachment: mb, name: 'map.png' }] });
-            return;
-          } catch (e) {
-            console.log('Mapbox fetch failed: ' + (e && e.message));
-            await message.channel.send(p2 + '\n⚠️ Map image failed: `' + (e && e.message ? e.message : 'unknown') + '`');
-            return;
-          }
+        loginIp = api.intToIp(x.LastLoginIP);
+        if (loginIp) {
+          const g = await api.fetchIpGeo(loginIp);
+          if (!g.error) geo = g;
         }
-        await message.channel.send(p2 + '\n⚠️ Map image off — set `MAPBOX_TOKEN` in Railway (then restart the service).');
-      } catch (e) {
-        console.log('Location failed: ' + (e && e.message));
+      } catch (_) {}
+
+      const token = String(process.env.MAPBOX_TOKEN || '').trim();
+      let mapUrl = null;
+      if (token && geo && geo.lat != null && geo.lon != null) {
+        mapUrl =
+          'https://api.mapbox.com/styles/v1/mapbox/streets-v11/static/pin-s+FF0000(' +
+          geo.lon + ',' + geo.lat + ')/' + geo.lon + ',' + geo.lat + ',12/800x500@2x?access_token=' +
+          encodeURIComponent(token);
       }
+
+      const L = (label, value) => '**' + label + ':** ' + value;
+      const d = [];
+      d.push(L('UID', '`' + V(out.uin) + '`'));
+      d.push(L('Nickname', clipT(nick, 80)));
+      d.push(L('Username', V(x.bind && x.bind.uname)));
+      d.push(L('Status', x.isfreeze ? '🔴 Frozen' : '🟢 Normal'));
+      d.push(L('Created on', tsec(x.CreateTime)));
+      d.push(L('Last online', tsec(x.LastLoginTime)));
+      d.push(L('Level', V(x.level)));
+      d.push(L('Developer', yn(x.isdeveloper)));
+      d.push(L('TotalMiniCoins', V(x.MiniCoinTotal)));
+      d.push(L('Current coins', V(x.minicoin)));
+      d.push(L('Current beans', V(x.minibean)));
+      d.push(L('Facebook', fb.nickname ? clipT(fb.nickname, 60) : '-'));
+      d.push(L('Email', V(x.Email)));
+      d.push(L('Phone', V(x.Phone)));
+      d.push(L('Country', (flagOf(cc) ? flagOf(cc) + ' ' : '') + V(cc)));
+      d.push(L('Gender', GENDER[prof.gender] !== undefined ? GENDER[prof.gender] : V(prof.gender)));
+      d.push(L('Creator Level', V(prof.creator && prof.creator.level)));
+      d.push(L('Head Frame', V(prof.head_frame_id)));
+      d.push(L('Total downloads', V(prof.all_download_count)));
+      d.push(L('Avatar skins', V(skins)));
+      d.push(L('Model / Skin', V(role.Model) + ' / ' + V(role.SkinID)));
+      d.push(L('Mood', clipT(prof.mood_text, 200)));
+      d.push(div);
+      d.push(L('Device System', V(extra.DeviceSystem)));
+      d.push(L('Device ID', V(extra.DeviceID)));
+      d.push(L('Device Vendor', V(extra.DeviceVender)));
+      d.push(L('ID Card', yn(x.idcard_authed)) + '   ' + L('Safe Verify', yn(x.isloginsafeverify)));
+
+      if (loginIp) {
+        d.push(div);
+        d.push(L('Last IP', '`' + loginIp + '`'));
+        if (geo) {
+          d.push(L('IP location', [geo.city, geo.region, geo.country].filter(Boolean).join(', ') || '-'));
+          d.push(L('ZIP', V(geo.postal)));
+          d.push(L('Internet provider', V(geo.isp)));
+          d.push(L('Coordinates', geo.lat != null && geo.lon != null ? '`' + geo.lat + ', ' + geo.lon + '`' : '-'));
+          d.push(L('Timezone', V(geo.tz)));
+        }
+      }
+
+      // ONE embed that LOOKS like plain text (bold labels in the description,
+      // not embed fields): avatar = thumbnail, Mapbox = the big image.
+      const embed = new EmbedBuilder()
+        .setColor(C_OK)
+        .setTitle(clipT(nick, 200))
+        .setDescription(d.join('\n').slice(0, 4000))
+        .setFooter({ text: 'GetInfo API • Updated: ' + new Date().toISOString().slice(0, 19).replace('T', ' ') })
+        .setTimestamp();
+      if (out.avatar) embed.setThumbnail(String(out.avatar).replace(/^http:\/\//i, 'https://'));
+      if (mapUrl) embed.setImage(mapUrl);
+
+      if (statusMsg) {
+        try { await statusMsg.edit({ embeds: [embed] }); return; } catch (_) {}
+      }
+      try { await message.channel.send({ embeds: [embed] }); } catch (_) {}
     }
 
     // ---- !bandev : public, fires immediately + schedules 3-min repeats
