@@ -280,8 +280,7 @@ client.on('messageCreate', async (message) => {
           '`!bandev <UID> [duration]` — Ban a UID. Duration: `1day`, `5m`, `2hours`. Repeats every 2 min until it ends.\n' +
             '`!unbandev <UID>` — Remove a UID from the bandev list. Only the original requester (or the owner) can unban.\n' +
             '`!bandevlist` — List active bans with player, requester, and ban time.\n' +
-            '`!checkinfo <UID>` — Full account info: profile, avatar, device, currency, login.\n' +
-            '`!checkinfo <UID>` — Full account info (level, device, login, coins).\n' +
+            '`!checkinfo <UID>` — Full account info + approximate IP location with a map.\n' +
             '`!debug` — Scheduler status.\n' +
             '`!help` — Show this message.\n\n' +
             '_A UID already on the list cannot be banned again._'
@@ -303,131 +302,119 @@ client.on('messageCreate', async (message) => {
         return;
       }
 
-      // Loading message — a NEW message, never a reply/mention.
+      // Plain loading line (a NEW message, never a reply/mention).
       let statusMsg = null;
       try {
-        statusMsg = await message.channel.send({ embeds: [msgEmbed(C_INFO, 'Fetching Info..', 'Loading account info for UID ' + uid + '...')] });
+        statusMsg = await message.channel.send('⏳ Fetching info for UID ' + uid + '...');
       } catch (err) {
         console.log('Status send failed: ' + (err && err.message));
       }
-      const finish = async (embed) => {
-        if (statusMsg) {
-          try { await statusMsg.edit({ embeds: [embed] }); return; } catch (_) {}
-        }
-        await respond(message, embed);
-      };
 
       const out = await api.fetchInfo(uid);
-      if (out.error) return await finish(msgEmbed(C_BAD, 'Info Failed', out.error));
+      if (out.error) {
+        if (statusMsg) { try { await statusMsg.edit('❌ ' + out.error); return; } catch (_) {} }
+        await respond(message, msgEmbed(C_BAD, 'Info Failed', out.error));
+        return;
+      }
 
       const x = out.data || {};
       const prof = out.prof || {};
       const role = out.role || {};
       const extra = out.extra || {};
 
-      // block-scoped display helpers
-      const dash = (v) => (v === undefined || v === null || v === '' ? '-' : String(v));
-      const yn = (v) => (v === true ? 'Yes' : v === false ? 'No' : dash(v));
-      const clip = (v, n) => { const s = dash(v).replace(/\s+/g, ' '); return s.length > n ? s.slice(0, n - 1) + '…' : s; };
-      const tshow = (v) => { const n = Number(v); return Number.isFinite(n) && n > 0 ? '<t:' + Math.round(n) + ':F>' : '-'; };
-      // Mini World stores IPs little-endian: 2453636455 -> 103.133.63.146.
-      const ip = (v) => { const n = Number(v); return Number.isFinite(n) && n > 0 ? [n & 255, (n >>> 8) & 255, (n >>> 16) & 255, (n >>> 24) & 255].join('.') : '-'; };
-      const devModel = (v) => {
-        if (v == null || v === '') return '-';
-        const s = String(v).trim();
-        if (s === '[]' || s === '{}' || s === 'null') return '-';
-        try {
-          const j = JSON.parse(s);
-          if (Array.isArray(j)) return j.length ? j.length + ' item(s)' : '-';
-          if (j && typeof j === 'object') { const ks = Object.keys(j); return ks.length ? ks.map((k) => k + '=' + j[k]).join(', ') : '-'; }
-        } catch (_) {}
-        return s;
-      };
+      // block-scoped display helpers (plain text output)
+      const V = (v) => (v === undefined || v === null || v === '' ? '-' : String(v));
+      const yn = (v) => (v === true ? 'Yes' : v === false ? 'No' : V(v));
+      const tsec = (v) => { const n = Number(v); if (!Number.isFinite(n) || n <= 0) return '-'; return new Date(n * 1000).toISOString().slice(0, 19).replace('T', ' '); };
+      const clipT = (v, n) => { const s = V(v).replace(/\s+/g, ' '); return s.length > n ? s.slice(0, n - 1) + '…' : s; };
+      const flagOf = (cc) => { const c = String(cc || '').trim().toUpperCase(); return c.length === 2 ? String.fromCodePoint(...[...c].map((ch) => 0x1f1e6 + ch.charCodeAt(0) - 65)) : ''; };
+      const div = '──────────────────────';
+      // Download an image as a Buffer so it can be attached to a message.
+      const fetchBuf = async (u) => { const r = await fetch(u, { headers: { 'User-Agent': 'MiniWorldDiscordBot/1.0' } }); if (!r.ok) throw new Error('HTTP ' + r.status); return Buffer.from(await r.arrayBuffer()); };
 
       const nick = role.NickName != null && role.NickName !== '' ? role.NickName : prof.NickName;
-      const country = [prof.country, extra.Country, x.bind_country].find((v) => v != null && v !== '') || '-';
+      const cc = prof.country || extra.Country || x.bind_country || '';
       const GENDER = { 1: 'Male', 2: 'Female', 0: 'Hidden' };
-
-      const F = (name, value, inline) => ({ name, value: clip(value, 1024), inline: inline !== false });
-      const fields = [
-        F('UID', '`' + dash(out.uin) + '`'),
-        F('Nickname', nick),
-        F('Country', country),
-        F('Level', dash(x.level)),
-        F('Gender', GENDER[prof.gender] || (prof.gender === 0 ? 'Hidden' : '-')),
-        F('Minicoin', dash(x.minicoin)),
-        F('Beans', dash(x.minibean)),
-        F('TotalMiniCoins', dash(x.MiniCoinTotal)),
-        F('Created', tshow(x.CreateTime)),
-        F('Last Login', tshow(x.LastLoginTime)),
-        F('Login IP', ip(x.LastLoginIP)),
-        F('Bind Time', tshow(x.AccountBindTime)),
-        F('Username', x.bind && x.bind.uname ? x.bind.uname : '-'),
-        F('Email', x.Email),
-        F('Phone', x.Phone),
-        F('Device System', extra.DeviceSystem),
-        F('Device ID', extra.DeviceID),
-        F('Device Vendor', extra.DeviceVender),
-        F('Device Model', devModel(extra.DeviceModel)),
-        F('Model / Skin', dash(role.Model) + ' / ' + dash(role.SkinID)),
-        F('Head Frame', dash(prof.head_frame_id)),
-        F('Map Downloads', dash(prof.all_download_count) + (prof.all_download_st ? ' (since ' + tshow(prof.all_download_st) + ')' : '')),
-        F('Flags', 'Developer: ' + yn(x.isdeveloper) + '  •  Frozen: ' + yn(x.isfreeze) + '  •  ID Card: ' + yn(x.idcard_authed) + '  •  Safe Verify: ' + yn(x.isloginsafeverify) + (prof.creator && prof.creator.level ? '  •  Creator Lv' + prof.creator.level : ''), false),
-      ];
-
-      // Facebook link — nickname/id/platform only.
-      // extra.facebook.authinfo.token and .sign are credentials: NEVER surfaced.
+      // extra.facebook.authinfo.token/.sign are credentials: never surfaced.
       const fb = extra.facebook && typeof extra.facebook === 'object' ? extra.facebook : {};
-      fields.push(
-        F('Facebook', (fb.nickname || fb.id)
-          ? 'Name: ' + dash(fb.nickname) + '  •  ID: ' + dash(fb.id) + '  •  ' + dash(fb.platform)
-          : 'Not linked', false)
-      );
+      const skins = Array.isArray(role.AvatarSkin) ? role.AvatarSkin.length : 0;
 
-      // Mood + icon + language combined to stay within Discord's 25-field cap.
-      const moodBits = [];
-      if (prof.mood_icon) moodBits.push('Icon: ' + prof.mood_icon);
-      if (prof.lang != null) moodBits.push('Lang: ' + prof.lang);
-      if (prof.mood_text) moodBits.push(String(prof.mood_text));
-      if (moodBits.length) fields.push(F('Mood', moodBits.join('\n'), false));
+      const b = [];
+      b.push('**' + clipT(nick, 60) + '**');
+      b.push(div);
+      b.push('**UID:** ' + V(out.uin));
+      b.push('**Status:** ' + (x.isfreeze ? '🔴 Frozen' : '🟢 Normal'));
+      b.push('**Created on:** ' + tsec(x.CreateTime));
+      b.push('**Last online:** ' + tsec(x.LastLoginTime));
+      b.push('**Level:** ' + V(x.level));
+      b.push('**Developer:** ' + yn(x.isdeveloper));
+      b.push('**TotalMiniCoins:** ' + V(x.MiniCoinTotal));
+      b.push('**Current coins:** ' + V(x.minicoin));
+      b.push('**Current beans:** ' + V(x.minibean));
+      b.push(div);
+      b.push('**Nickname:** ' + clipT(nick, 80));
+      b.push('**Username:** ' + V(x.bind && x.bind.uname));
+      b.push('**Facebook:** ' + (fb.nickname ? clipT(fb.nickname, 60) : '-'));
+      b.push('**Email:** ' + V(x.Email));
+      b.push('**Phone:** ' + V(x.Phone));
+      b.push('**Country:** ' + (flagOf(cc) ? flagOf(cc) + ' ' : '') + V(cc));
+      b.push('**Gender:** ' + (GENDER[prof.gender] !== undefined ? GENDER[prof.gender] : V(prof.gender)));
+      b.push('**Head Frame:** ' + V(prof.head_frame_id));
+      b.push('**Total downloads:** ' + V(prof.all_download_count));
+      b.push('**Avatar skins:** ' + V(skins));
+      b.push('**Model / Skin:** ' + V(role.Model) + ' / ' + V(role.SkinID));
+      b.push('**Mood:** ' + clipT(prof.mood_text, 120));
+      b.push(div);
+      b.push('**Device System:** ' + V(extra.DeviceSystem));
+      b.push('**Device ID:** ' + V(extra.DeviceID));
+      b.push('**Device Vendor:** ' + V(extra.DeviceVender));
+      b.push('**ID Card:** ' + yn(x.idcard_authed) + '   **Safe Verify:** ' + yn(x.isloginsafeverify));
 
-      const embed = new EmbedBuilder()
-        .setColor(C_OK)
-        .setTitle('Account Info — ' + uid)
-        .addFields(fields)
-        .setFooter({ text: 'GetInfo API' })
-        .setTimestamp();
-      // Discord rejects http:// embed images — upgrade to https for the thumbnail.
-      if (out.avatar) embed.setThumbnail(String(out.avatar).replace(/^http:\/\//i, 'https://'));
+      const p1 = b.join('\n');
+      // Turn the loading line into the profile, attaching the avatar when possible.
+      if (statusMsg) {
+        let ok = false;
+        if (out.avatar) {
+          try { const ab = await fetchBuf(out.avatar); await statusMsg.edit({ content: p1, files: [{ attachment: ab, name: 'avatar.png' }] }); ok = true; } catch (_) {}
+        }
+        if (!ok) { try { await statusMsg.edit(p1); ok = true; } catch (_) {} }
+        if (!ok) { try { await message.channel.send(p1); } catch (_) {} }
+      } else {
+        try { await message.channel.send(p1); } catch (_) {}
+      }
 
-      await finish(embed);
-
-      // --- Approximate location box, right after the info embed ----------
-      // Driven by the login IP. IP geolocation is APPROXIMATE (city/region
-      // centroid), never an exact address — VPN/proxy/mobile often resolve far
-      // away. Wrapped in try/catch so a geo/embed failure never breaks !checkinfo.
+      // ---- Location box (approximate, IP-based) + static map image ----
+      // IP geolocation is APPROXIMATE (city centroid), never an exact address.
       try {
         const loginIp = api.intToIp(x.LastLoginIP);
         if (!loginIp) return;
         const geo = await api.fetchIpGeo(loginIp);
-        if (geo.error || geo.lat == null || geo.lon == null) return;
+        if (geo.error) return;
 
-        const loc = new EmbedBuilder()
-          .setColor(C_INFO)
-          .setTitle('Approximate Location (IP-based)')
-          .setLocation(geo.lat, geo.lon, [geo.city, geo.country].filter(Boolean).join(', '))
-          .setDescription('Login IP `' + loginIp + '` → **approximate (city-level)**, not an exact address.')
-          .addFields(
-            { name: 'Coordinates', value: '`' + geo.lat + ', ' + geo.lon + '`', inline: true },
-            { name: 'Region', value: [geo.city, geo.region, geo.country].filter(Boolean).join(', ') || '-', inline: true },
-            { name: 'ISP', value: geo.isp || '-', inline: true },
-            { name: 'Timezone', value: geo.tz || '-', inline: true }
-          )
-          .setURL('https://www.google.com/maps?q=' + geo.lat + ',' + geo.lon)
-          .setFooter({ text: 'IP geolocation = city centroid. VPN/proxy/mobile can be far off.' });
-        await message.channel.send({ embeds: [loc] });
+        const l = [];
+        l.push(div);
+        l.push('**Last IP:** ' + loginIp);
+        l.push('**IP location:** ' + ([geo.city, geo.region, geo.country].filter(Boolean).join(', ') || '-'));
+        l.push('**ZIP:** ' + V(geo.postal));
+        l.push('**Internet provider:** ' + V(geo.isp));
+        l.push('**Coordinates:** ' + (geo.lat != null && geo.lon != null ? geo.lat + ', ' + geo.lon : '-'));
+        l.push('**Timezone:** ' + V(geo.tz));
+        l.push('**Updated:** ' + new Date().toISOString().slice(0, 19).replace('T', ' '));
+        const p2 = l.join('\n');
+
+        // Mapbox static image (same provider as the site). Needs MAPBOX_TOKEN;
+        // without it the text still goes out, just no picture.
+        const token = process.env.MAPBOX_TOKEN || '';
+        if (token && geo.lat != null && geo.lon != null) {
+          const mapUrl =
+            'https://api.mapbox.com/styles/v1/mapbox/streets-v11/static/pin-s+FF0000(' +
+            geo.lon + ',' + geo.lat + ')/' + geo.lon + ',' + geo.lat + ',12/800x500@2x?access_token=' +
+            encodeURIComponent(token);
+          try { const mb = await fetchBuf(mapUrl); await message.channel.send({ content: p2, files: [{ attachment: mb, name: 'map.png' }] }); return; } catch (_) {}
+        }
+        await message.channel.send(p2);
       } catch (e) {
-        console.log('Location embed failed: ' + (e && e.message));
+        console.log('Location failed: ' + (e && e.message));
       }
     }
 
@@ -585,38 +572,6 @@ client.on('messageCreate', async (message) => {
           (e.until ? '\n**Ends:** <t:' + Math.round(e.until / 1000) + ':R>' : '')
       );
       await respond(message, msgEmbed(C_INFO, 'Active Bans (' + entries.length + ')', lines.join('\n\n')));
-      return;
-    }
-
-    // ---- !checkinfo : full account info via the getinfo API
-    if (cmd === 'checkinfo' || cmd === 'getinfo') {
-      const uin = args[0];
-      if (!uin) {
-        await respond(message, msgEmbed(C_BAD, 'Invalid Format', 'Usage: `!checkinfo <UID>`\nExample: `!checkinfo 1137790884`'));
-        return;
-      }
-      const uid = api.fixUin(uin);
-      if (!uid) {
-        await respond(message, msgEmbed(C_BAD, 'Invalid UID', 'Use 8, 9, or 10 digits.'));
-        return;
-      }
-
-      let statusMsg = null;
-      try {
-        statusMsg = await message.channel.send({ embeds: [msgEmbed(C_INFO, 'Fetching data..', 'Getting account info for UID ' + uid + '...')] });
-      } catch (err) {
-        console.log('Status send failed: ' + (err && err.message));
-      }
-
-      const out = await api.fetchInfo(uid);
-      const embed = buildInfoEmbed(out);
-      if (statusMsg) {
-        try {
-          await statusMsg.edit({ embeds: [embed] });
-          return;
-        } catch (_) {}
-      }
-      await respond(message, embed);
       return;
     }
 
