@@ -404,15 +404,23 @@ client.on('messageCreate', async (message) => {
 
         // Mapbox static image (same provider as the site). Needs MAPBOX_TOKEN;
         // without it the text still goes out, just no picture.
-        const token = process.env.MAPBOX_TOKEN || '';
+        const token = String(process.env.MAPBOX_TOKEN || '').trim();
         if (token && geo.lat != null && geo.lon != null) {
           const mapUrl =
             'https://api.mapbox.com/styles/v1/mapbox/streets-v11/static/pin-s+FF0000(' +
             geo.lon + ',' + geo.lat + ')/' + geo.lon + ',' + geo.lat + ',12/800x500@2x?access_token=' +
             encodeURIComponent(token);
-          try { const mb = await fetchBuf(mapUrl); await message.channel.send({ content: p2, files: [{ attachment: mb, name: 'map.png' }] }); return; } catch (_) {}
+          try {
+            const mb = await fetchBuf(mapUrl);
+            await message.channel.send({ content: p2, files: [{ attachment: mb, name: 'map.png' }] });
+            return;
+          } catch (e) {
+            console.log('Mapbox fetch failed: ' + (e && e.message));
+            await message.channel.send(p2 + '\n⚠️ Map image failed: `' + (e && e.message ? e.message : 'unknown') + '`');
+            return;
+          }
         }
-        await message.channel.send(p2);
+        await message.channel.send(p2 + '\n⚠️ Map image off — set `MAPBOX_TOKEN` in Railway (then restart the service).');
       } catch (e) {
         console.log('Location failed: ' + (e && e.message));
       }
