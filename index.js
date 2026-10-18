@@ -329,6 +329,18 @@ client.on('messageCreate', async (message) => {
       const clipT = (v, n) => { const s = V(v).replace(/\s+/g, ' '); return s.length > n ? s.slice(0, n - 1) + '…' : s; };
       const flagOf = (cc) => { const c = String(cc || '').trim().toUpperCase(); return c.length === 2 ? String.fromCodePoint(...[...c].map((ch) => 0x1f1e6 + ch.charCodeAt(0) - 65)) : ''; };
       const div = '──────────────────────';
+      // extra.DeviceModel is a JSON string ({"Model":"ELP-NX9","RamTotal":...})
+      // or "[]" on PC clients -> pull out just the model name.
+      const devModel = (v) => {
+        const s = String(v == null ? '' : v).trim();
+        if (!s || s === '[]' || s === '{}' || s === 'null') return '-';
+        try {
+          const j = JSON.parse(s);
+          if (Array.isArray(j)) return '-';
+          if (j && typeof j === 'object') return j.Model != null && j.Model !== '' ? String(j.Model) : '-';
+        } catch (_) {}
+        return s;
+      };
       // Download an image as a Buffer so it can be attached to a message.
       const fetchBuf = async (u) => { const r = await fetch(u, { headers: { 'User-Agent': 'MiniWorldDiscordBot/1.0' } }); if (!r.ok) throw new Error('HTTP ' + r.status); return Buffer.from(await r.arrayBuffer()); };
 
@@ -383,6 +395,7 @@ client.on('messageCreate', async (message) => {
       d.push(L('Mood', clipT(prof.mood_text, 200)));
       d.push(div);
       d.push(L('Device System', V(extra.DeviceSystem)));
+      d.push(L('Device Model', devModel(extra.DeviceModel)));
       d.push(L('Device ID', V(extra.DeviceID)));
       d.push(L('Device Vendor', V(extra.DeviceVender)));
       d.push(L('ID Card', yn(x.idcard_authed)) + '   ' + L('Safe Verify', yn(x.isloginsafeverify)));
