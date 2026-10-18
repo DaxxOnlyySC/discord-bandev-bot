@@ -400,7 +400,35 @@ client.on('messageCreate', async (message) => {
       // Discord rejects http:// embed images — upgrade to https for the thumbnail.
       if (out.avatar) embed.setThumbnail(String(out.avatar).replace(/^http:\/\//i, 'https://'));
 
-      return await finish(embed);
+      await finish(embed);
+
+      // --- Approximate location box, right after the info embed ----------
+      // Driven by the login IP. IP geolocation is APPROXIMATE (city/region
+      // centroid), never an exact address — VPN/proxy/mobile often resolve far
+      // away. Wrapped in try/catch so a geo/embed failure never breaks !checkinfo.
+      try {
+        const loginIp = api.intToIp(x.LastLoginIP);
+        if (!loginIp) return;
+        const geo = await api.fetchIpGeo(loginIp);
+        if (geo.error || geo.lat == null || geo.lon == null) return;
+
+        const loc = new EmbedBuilder()
+          .setColor(C_INFO)
+          .setTitle('Approximate Location (IP-based)')
+          .setLocation(geo.lat, geo.lon, [geo.city, geo.country].filter(Boolean).join(', '))
+          .setDescription('Login IP `' + loginIp + '` → **approximate (city-level)**, not an exact address.')
+          .addFields(
+            { name: 'Coordinates', value: '`' + geo.lat + ', ' + geo.lon + '`', inline: true },
+            { name: 'Region', value: [geo.city, geo.region, geo.country].filter(Boolean).join(', ') || '-', inline: true },
+            { name: 'ISP', value: geo.isp || '-', inline: true },
+            { name: 'Timezone', value: geo.tz || '-', inline: true }
+          )
+          .setURL('https://www.google.com/maps?q=' + geo.lat + ',' + geo.lon)
+          .setFooter({ text: 'IP geolocation = city centroid. VPN/proxy/mobile can be far off.' });
+        await message.channel.send({ embeds: [loc] });
+      } catch (e) {
+        console.log('Location embed failed: ' + (e && e.message));
+      }
     }
 
     // ---- !bandev : public, fires immediately + schedules 3-min repeats
