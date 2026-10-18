@@ -330,7 +330,8 @@ client.on('messageCreate', async (message) => {
       const yn = (v) => (v === true ? 'Yes' : v === false ? 'No' : dash(v));
       const clip = (v, n) => { const s = dash(v).replace(/\s+/g, ' '); return s.length > n ? s.slice(0, n - 1) + '…' : s; };
       const tshow = (v) => { const n = Number(v); return Number.isFinite(n) && n > 0 ? '<t:' + Math.round(n) + ':F>' : '-'; };
-      const ip = (v) => { const n = Number(v); return Number.isFinite(n) && n > 0 ? [(n >>> 24) & 255, (n >>> 16) & 255, (n >>> 8) & 255, n & 255].join('.') : '-'; };
+      // Mini World stores IPs little-endian: 2453636455 -> 103.133.63.146.
+      const ip = (v) => { const n = Number(v); return Number.isFinite(n) && n > 0 ? [n & 255, (n >>> 8) & 255, (n >>> 16) & 255, (n >>> 24) & 255].join('.') : '-'; };
       const devModel = (v) => {
         if (v == null || v === '') return '-';
         const s = String(v).trim();
