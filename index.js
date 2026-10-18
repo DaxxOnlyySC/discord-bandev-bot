@@ -345,6 +345,7 @@ client.on('messageCreate', async (message) => {
 
       const nick = role.NickName != null && role.NickName !== '' ? role.NickName : prof.NickName;
       const country = [prof.country, extra.Country, x.bind_country].find((v) => v != null && v !== '') || '-';
+      const GENDER = { 1: 'Male', 2: 'Female', 0: 'Hidden' };
 
       const F = (name, value, inline) => ({ name, value: clip(value, 1024), inline: inline !== false });
       const fields = [
@@ -352,8 +353,10 @@ client.on('messageCreate', async (message) => {
         F('Nickname', nick),
         F('Country', country),
         F('Level', dash(x.level)),
+        F('Gender', GENDER[prof.gender] || (prof.gender === 0 ? 'Hidden' : '-')),
         F('Minicoin', dash(x.minicoin)),
         F('Beans', dash(x.minibean)),
+        F('Lifetime Coins', dash(x.MiniCoinTotal)),
         F('Created', tshow(x.CreateTime)),
         F('Last Login', tshow(x.LastLoginTime)),
         F('Login IP', ip(x.LastLoginIP)),
@@ -365,9 +368,27 @@ client.on('messageCreate', async (message) => {
         F('Device ID', extra.DeviceID),
         F('Device Vendor', extra.DeviceVender),
         F('Device Model', devModel(extra.DeviceModel)),
-        F('Flags', 'Developer: ' + yn(x.isdeveloper) + '  •  Frozen: ' + yn(x.isfreeze) + '  •  ID Card: ' + yn(x.idcard_authed) + '  •  Safe Verify: ' + yn(x.isloginsafeverify), false),
+        F('Model / Skin', dash(role.Model) + ' / ' + dash(role.SkinID)),
+        F('Head Frame', dash(prof.head_frame_id)),
+        F('Map Downloads', dash(prof.all_download_count) + (prof.all_download_st ? ' (since ' + tshow(prof.all_download_st) + ')' : '')),
+        F('Flags', 'Developer: ' + yn(x.isdeveloper) + '  •  Frozen: ' + yn(x.isfreeze) + '  •  ID Card: ' + yn(x.idcard_authed) + '  •  Safe Verify: ' + yn(x.isloginsafeverify) + (prof.creator && prof.creator.level ? '  •  Creator Lv' + prof.creator.level : ''), false),
       ];
-      if (prof.mood_text) fields.push(F('Mood', prof.mood_text, false));
+
+      // Facebook link — nickname/id/platform only.
+      // extra.facebook.authinfo.token and .sign are credentials: NEVER surfaced.
+      const fb = extra.facebook && typeof extra.facebook === 'object' ? extra.facebook : {};
+      fields.push(
+        F('Facebook', (fb.nickname || fb.id)
+          ? 'Name: ' + dash(fb.nickname) + '  •  ID: ' + dash(fb.id) + '  •  ' + dash(fb.platform)
+          : 'Not linked', false)
+      );
+
+      // Mood + icon + language combined to stay within Discord's 25-field cap.
+      const moodBits = [];
+      if (prof.mood_icon) moodBits.push('Icon: ' + prof.mood_icon);
+      if (prof.lang != null) moodBits.push('Lang: ' + prof.lang);
+      if (prof.mood_text) moodBits.push(String(prof.mood_text));
+      if (moodBits.length) fields.push(F('Mood', moodBits.join('\n'), false));
 
       const embed = new EmbedBuilder()
         .setColor(C_OK)
@@ -375,8 +396,8 @@ client.on('messageCreate', async (message) => {
         .addFields(fields)
         .setFooter({ text: 'GetInfo API' })
         .setTimestamp();
-      // Discord rejects http:// embed images — only set the avatar when it's https.
-      if (out.avatar && /^https:\/\//i.test(out.avatar)) embed.setThumbnail(out.avatar);
+      // Discord rejects http:// embed images — upgrade to https for the thumbnail.
+      if (out.avatar) embed.setThumbnail(String(out.avatar).replace(/^http:\/\//i, 'https://'));
 
       return await finish(embed);
     }
