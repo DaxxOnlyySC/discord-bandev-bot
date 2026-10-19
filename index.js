@@ -18,7 +18,11 @@ const OWNER_ID = String(process.env.OWNER_ID || '1286240448775720962');
 
 // Retry for "Player not found" (target offline) errors.
 const RETRY_DELAY_MS = 3 * 60 * 1000; // jeda beberapa menit sebelum retry
-const MAX_RETRIES = 5; // give up + DM owner setelah N error beruntun
+const MAX_RETRIES = 5; // give up this round after N consecutive errors
+// After giving up, cool down this long, then restart a fresh retry cycle.
+// The ban is NOT dropped — it keeps re-trying every 10 minutes until unbanned
+// or its duration (`until`) expires.
+const GAVE_UP_COOLDOWN_MS = 10 * 60 * 1000;
 
 // Colors
 const C_INFO = 0x3498db;
@@ -72,14 +76,32 @@ async function notifyOwner(clientRef, payload) {
   }
 }
 
-/** Embed DM'd to the owner when a ban gives up after MAX_RETRIES "Player not found". */
+/**
+ * DM the person who ran !bandev (NOT the owner) when their ban gives up.
+ * Falls back to the owner if the requester is unknown or their DMs are closed,
+ * so the give-up never goes unnoticed.
+ */
+async function notifyRequester(clientRef, entry, payload) {
+  const uid = entry && entry.requestedBy;
+  if (!uid) return notifyOwner(clientRef, payload);
+  try {
+    const user = await clientRef.users.fetch(uid);
+    await user.send(payload);
+    return true;
+  } catch (err) {
+    console.log('Requester DM failed (' + uid + '): ' + (err && err.message));
+    return notifyOwner(clientRef, payload);
+  }
+}
+
+/** Embed sent to the REQUESTER when a ban gives up after MAX_RETRIES "Player not found". */
 function buildGaveUpEmbed(uin, entry, errorMsg, retryCount) {
   return new EmbedBuilder()
     .setColor(C_BAD)
     .setTitle('Ban Gave Up — ' + uin)
     .setDescription(
-      'Stopped retrying the device ban for UID ' + uin + ' after **' + retryCount +
-        '** consecutive "Player not found" errors.\nThe target is likely offline (the ban API needs them online to target the device).'
+      'Paused the device ban for UID ' + uin + ' after **' + retryCount +
+        '** consecutive "Player not found" errors.\nThe target is likely offline (the ban API needs them online to target the device).\nIt will automatically retry in **10 minutes**.'
     )
     .addFields(
       { name: 'UID', value: String(uin), inline: true },
@@ -87,7 +109,7 @@ function buildGaveUpEmbed(uin, entry, errorMsg, retryCount) {
       { name: 'Requested by', value: (entry && entry.requestedByName) || 'Unknown', inline: true },
       { name: 'Last error', value: String(errorMsg).slice(0, 200), inline: false }
     )
-    .setFooter({ text: 'Run !unbandev then !bandev to retry once they are online.' });
+    .setFooter({ text: 'Auto-retrying every 10 minutes. Use !unbandev to stop.' });
 }
 
 /**
@@ -119,9 +141,20 @@ function recordFire(uin, errorMsg, okMsg) {
   const retryCount = (prev.retryCount || 0) + 1;
   const fc = (prev.fireCount || 0) + 1;
   if (retryCount >= MAX_RETRIES) {
-    bans.put(uin, { lastFiredAt: now, lastResult: 'ERR: ' + errorMsg, retryCount, fireCount: fc, gaveUp: true, repeat: null, nextAt: null });
-    notifyOwner(client, { embeds: [buildGaveUpEmbed(uin, prev, errorMsg, retryCount)] });
-    console.log('BANDEV gave up ' + uin + ' after ' + retryCount + ' retries: ' + errorMsg);
+    // Give up THIS round, but don't drop the ban: cool down 10 minutes, then
+    // start a fresh retry cycle (retryCount resets so the next round gets
+    // MAX_RETRIES tries again). `repeat` MUST stay truthy or bans.due() skips it.
+    bans.put(uin, {
+      lastFiredAt: now,
+      lastResult: 'ERR: ' + errorMsg + ' — gave up, retrying in ' + Math.round(GAVE_UP_COOLDOWN_MS / 60000) + 'm',
+      retryCount: 0,
+      fireCount: fc,
+      gaveUp: true,
+      repeat: prev.repeat || bans.REPEAT_MS,
+      nextAt: now + GAVE_UP_COOLDOWN_MS,
+    });
+    notifyRequester(client, prev, { embeds: [buildGaveUpEmbed(uin, prev, errorMsg, retryCount)] });
+    console.log('BANDEV gave up ' + uin + ' after ' + retryCount + ' retries; retrying in 10m: ' + errorMsg);
   } else {
     bans.put(uin, {
       lastFiredAt: now,
@@ -592,12 +625,12 @@ client.on('messageCreate', async (message) => {
       const fmtTs = (ms) => (ms ? '<t:' + Math.round(ms / 1000) + ':f>' : '-');
       const schedLines = entries.length
         ? entries.map((e) => {
-            const nextIn = e.gaveUp ? 'stopped — gave up' : (e.nextAt ? Math.round((e.nextAt - now) / 1000) + 's' : '-');
+            const nextIn = e.nextAt ? Math.round((e.nextAt - now) / 1000) + 's' : '-';
             const untilIn = e.until ? Math.round((e.until - now) / 1000) + 's' : 'one-time';
             const lastFired = e.lastFiredAt ? '<t:' + Math.round(e.lastFiredAt / 1000) + ':R>' : 'never';
             const fires = e.fireCount || 0;
             const retry = e.gaveUp
-              ? ' ⚠️ **GAVE UP** after ' + (e.retryCount || 0) + ' retries'
+              ? ' ⚠️ **GAVE UP** — auto-retry every ' + Math.round(GAVE_UP_COOLDOWN_MS / 60000) + 'm'
               : (e.retryCount ? ' _(retry ' + e.retryCount + '/' + MAX_RETRIES + ')_' : '');
             const result = e.lastResult ? String(e.lastResult).slice(0, 120) : 'n/a (not yet re-fired)';
             return (
