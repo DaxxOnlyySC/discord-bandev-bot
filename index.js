@@ -399,11 +399,23 @@ client.on('messageCreate', async (message) => {
 
       const token = String(process.env.MAPBOX_TOKEN || '').trim();
       let mapUrl = null;
+      let mapBuf = null;
       if (token && geo && geo.lat != null && geo.lon != null) {
         mapUrl =
           'https://api.mapbox.com/styles/v1/mapbox/streets-v11/static/pin-s+FF0000(' +
-          geo.lon + ',' + geo.lat + ')/' + geo.lon + ',' + geo.lat + ',12/800x500@2x?access_token=' +
+          geo.lon + ',' + geo.lat + ')/' + geo.lon + ',' + geo.lat + ',12/700x440@2x?access_token=' +
           encodeURIComponent(token);
+        // Mapbox renders static maps on-demand and Discord would fetch that URL
+        // through its own proxy, so the embed image pops in noticeably later
+        // than the text. Grabbing the bytes here lets us upload them directly
+        // with the message, so the map shows up together with the card.
+        // Falls back to the plain URL if the prefetch fails.
+        try {
+          mapBuf = await Promise.race([
+            fetchBuf(mapUrl),
+            new Promise((_, rej) => setTimeout(() => rej(new Error('map fetch timeout')), 15000)),
+          ]);
+        } catch (_) { mapBuf = null; }
       }
 
       const L = (label, value) => '**' + label + ':** ' + value;
@@ -454,11 +466,14 @@ client.on('messageCreate', async (message) => {
         .setFooter({ text: 'GetInfo API • Updated: ' + new Date().toISOString().slice(0, 19).replace('T', ' ') })
         .setTimestamp();
       if (out.avatar) embed.setThumbnail(String(out.avatar).replace(/^http:\/\//i, 'https://'));
-      if (mapUrl) embed.setImage(mapUrl);
+      if (mapBuf) embed.setImage('attachment://map.png');
+      else if (mapUrl) embed.setImage(mapUrl);
 
       // Drop the loading line, then send the finished card as a fresh message.
       if (statusMsg) { try { await statusMsg.delete(); } catch (_) {} }
-      try { await message.channel.send({ embeds: [embed] }); } catch (_) {}
+      const payload = { embeds: [embed] };
+      if (mapBuf) payload.files = [{ attachment: mapBuf, name: 'map.png' }];
+      try { await message.channel.send(payload); } catch (_) {}
     }
 
     // ---- !bandev : public, fires immediately + schedules 3-min repeats
