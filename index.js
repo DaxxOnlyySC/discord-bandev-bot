@@ -7,6 +7,8 @@ const {
   GatewayIntentBits,
   Partials,
   EmbedBuilder,
+  ActionRowBuilder,
+  StringSelectMenuBuilder,
 } = require('discord.js');
 
 const api = require('./lib/api');
@@ -59,6 +61,46 @@ async function respond(message, embed) {
     console.log('Send failed: ' + (err && err.message));
     return false;
   }
+}
+
+/** Profile card embed from the baseinfo v1 payload. */
+function profileEmbed(prof, uin) {
+  const role = prof.RoleInfo || {};
+  const nick = String(role.NickName || prof.NickName || '(unknown)');
+  const e = msgEmbed(C_OK, nick, 'Profile for UID `' + uin + '`');
+
+  const gender =
+    prof.gender === 1 ? 'Male' : prof.gender === 2 ? 'Female' : 'Not set';
+  const num = (v) => (v === undefined || v === null || v === '' ? '-' : String(v));
+
+  e.addFields(
+    { name: 'UID', value: '`' + uin + '`', inline: true },
+    { name: 'Country', value: num(prof.country), inline: true },
+    { name: 'Gender', value: gender, inline: true },
+    { name: 'Popularity', value: num(prof.popularity), inline: true },
+    { name: 'Downloads', value: num(prof.all_download_count), inline: true },
+    { name: 'Head Frame', value: num(prof.head_frame_id), inline: true }
+  );
+
+  if (prof.mood_text && String(prof.mood_text).trim()) {
+    e.addFields({ name: 'Mood', value: String(prof.mood_text).slice(0, 1000) });
+  }
+
+  if (prof.header2 && prof.header2.url) e.setThumbnail(prof.header2.url);
+  return e;
+}
+
+/** Fixed-width room table: No | Name | UID | Players. */
+function roomTable(rooms) {
+  const line = 'No  ' + 'Name'.padEnd(21) + 'UID'.padEnd(13) + 'Players';
+  const bar = '-'.repeat(Math.max(line.length, 46));
+  const rows = rooms.map((r, i) => {
+    const n = String(i + 1).padEnd(4);
+    const nm = r.name.slice(0, 20).padEnd(21);
+    const uid = r.uin.padEnd(13);
+    return n + nm + uid + (r.cur + '/' + r.max);
+  });
+  return '```' + '\n' + line + '\n' + bar + '\n' + rows.join('\n') + '\n' + '```';
 }
 
 /**
@@ -314,11 +356,87 @@ client.on('messageCreate', async (message) => {
             '`!unbandev <UID>` — Remove a UID from the bandev list. Only the original requester (or the owner) can unban.\n' +
             '`!bandevlist` — List active bans with player, requester, and ban time.\n' +
             '`!checkinfo <UID>` — Full account info + approximate IP location with a map.\n' +
+            '`!checkroom` — Active Back To School rooms; pick one to view its host profile.\n' +
             '`!debug` — Scheduler status.\n' +
             '`!help` — Show this message.\n\n' +
             '_A UID already on the list cannot be banned again._'
         )
       );
+      return;
+    }
+
+    // ---- !checkroom : list Back To School rooms, pick one to view its host profile
+    if (cmd === 'checkroom' || cmd === 'room' || cmd === 'rooms') {
+      let loading = null;
+      try {
+        loading = await message.channel.send('⏳ Fetching active rooms...');
+      } catch (_) {}
+
+      const out = await api.fetchRooms();
+      if (out.error) {
+        if (loading) { try { await loading.edit('❌ ' + out.error); } catch (_) {} }
+        else await respond(message, msgEmbed(C_BAD, 'Room Check Failed', out.error));
+        return;
+      }
+
+      const rooms = out.rooms || [];
+      const mapName = out.roomName || 'Back To School [2.0]';
+      if (!rooms.length) {
+        if (loading) { try { await loading.edit('No active rooms right now.'); } catch (_) {} }
+        else await respond(message, msgEmbed(C_INFO, mapName, 'No active rooms right now.'));
+        return;
+      }
+
+      // Title matches the reference layout: "<room name> (<host>)"
+      const title = mapName + ' (' + rooms[0].name + ')';
+      const e = msgEmbed(C_INFO, title, roomTable(rooms));
+      e.setFooter({ text: 'Updated: ' + new Date().toISOString().replace('T', ' ').slice(0, 19) });
+
+      // Select menu: one option per room (Discord caps options at 25).
+      const options = rooms.slice(0, 25).map((r, i) => ({
+        label: (i + 1) + '. ' + r.name.slice(0, 90),
+        description: 'UID ' + r.uin + ' | ' + r.cur + '/' + r.max + ' players',
+        value: r.uin,
+      }));
+
+      const row = new ActionRowBuilder().addComponents(
+        new StringSelectMenuBuilder()
+          .setCustomId('checkroom_profile')
+          .setPlaceholder('Select a room to view the profile...')
+          .addOptions(options)
+      );
+
+      const sent = await message.channel.send({ embeds: [e], components: [row] });
+      if (loading) { try { await loading.delete(); } catch (_) {} }
+
+      // Only the command author may pick, so randoms can't drive the menu.
+      const collector = sent.createMessageComponentCollector({ time: 5 * 60 * 1000 });
+
+      collector.on('collect', async (i) => {
+        if (i.user.id !== message.author.id) {
+          try {
+            await i.reply({
+              content: 'Only <@' + message.author.id + '> can use this menu.',
+              ephemeral: true,
+            });
+          } catch (_) {}
+          return;
+        }
+
+        try { await i.deferReply(); } catch (_) { return; }
+
+        const p = await api.fetchProfileCard(i.values[0]);
+        if (p.error) {
+          try { await i.editReply({ embeds: [msgEmbed(C_BAD, 'Profile Failed', p.error)], components: [] }); } catch (_) {}
+          return;
+        }
+        try { await i.editReply({ embeds: [profileEmbed(p.prof, p.uin)], components: [] }); } catch (_) {}
+        collector.stop();
+      });
+
+      collector.on('end', async () => {
+        try { await sent.edit({ components: [] }); } catch (_) {}
+      });
       return;
     }
 
