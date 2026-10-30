@@ -9,6 +9,8 @@ const {
   EmbedBuilder,
   ActionRowBuilder,
   StringSelectMenuBuilder,
+  ButtonBuilder,
+  ButtonStyle,
 } = require('discord.js');
 
 const api = require('./lib/api');
@@ -95,6 +97,153 @@ function profileEmbed(prof, uin) {
 
   if (prof.header2 && prof.header2.url) e.setThumbnail(prof.header2.url);
   return e;
+}
+
+/**
+ * Blue "View Details" button shown under a profile card. The UID rides in the
+ * custom id, so the persistent handler can resolve it without server state.
+ */
+function detailsButton(uin) {
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId('checkroom_details:' + uin)
+      .setLabel('View Details')
+      .setStyle(ButtonStyle.Primary)
+  );
+}
+
+/**
+ * The full GetInfo card for a fetchInfo() result — the exact card !checkinfo
+ * posts, shared by the command and by the "View Details" button so the two can
+ * never drift apart.
+ *
+ * Async because it resolves the IP location and prefetches the Mapbox image
+ * first, letting the map ride inside the embed instead of loading late.
+ * Resolves { embed, files }.
+ */
+async function buildCheckinfoEmbed(out) {
+  if (!out || out.error) {
+    return { embed: msgEmbed(C_BAD, 'Info Failed', (out && out.error) || 'No data.'), files: [] };
+  }
+
+  const x = out.data || {};
+  const prof = out.prof || {};
+  const role = out.role || {};
+  const extra = out.extra || {};
+
+  const V = (v) => (v === undefined || v === null || v === '' ? '-' : String(v));
+  const yn = (v) => (v === true ? 'Yes' : v === false ? 'No' : V(v));
+  const tsec = (v) => { const n = Number(v); if (!Number.isFinite(n) || n <= 0) return '-'; return new Date(n * 1000).toISOString().slice(0, 19).replace('T', ' '); };
+  const clipT = (v, n) => { const s = V(v).replace(/\s+/g, ' '); return s.length > n ? s.slice(0, n - 1) + '…' : s; };
+  const flagOf = (cc) => { const c = String(cc || '').trim().toUpperCase(); return c.length === 2 ? String.fromCodePoint(...[...c].map((ch) => 0x1f1e6 + ch.charCodeAt(0) - 65)) : ''; };
+  const div = '──────────────────────';
+  // extra.DeviceModel is a JSON string ({"Model":"ELP-NX9","RamTotal":...})
+  // or "[]" on PC clients -> pull out just the model name.
+  const devModel = (v) => {
+    const s = String(v == null ? '' : v).trim();
+    if (!s || s === '[]' || s === '{}' || s === 'null') return '-';
+    try {
+      const j = JSON.parse(s);
+      if (Array.isArray(j)) return '-';
+      if (j && typeof j === 'object') return j.Model != null && j.Model !== '' ? String(j.Model) : '-';
+    } catch (_) {}
+    return s;
+  };
+  // Download an image as a Buffer so it can be attached to a message.
+  const fetchBuf = async (u) => { const r = await fetch(u, { headers: { 'User-Agent': 'MiniWorldDiscordBot/1.0' } }); if (!r.ok) throw new Error('HTTP ' + r.status); return Buffer.from(await r.arrayBuffer()); };
+
+  const nick = role.NickName != null && role.NickName !== '' ? role.NickName : prof.NickName;
+  const cc = prof.country || extra.Country || x.bind_country || '';
+  const GENDER = { 1: 'Male', 2: 'Female', 0: 'Hidden' };
+  // extra.facebook.authinfo.token/.sign are credentials: never surfaced.
+  const fb = extra.facebook && typeof extra.facebook === 'object' ? extra.facebook : {};
+
+  // ---- Location (approximate, IP-based). Fetched BEFORE building the embed
+  // so the map can go inside it via setImage(). Any failure just leaves the
+  // image out — the profile still renders.
+  let geo = null;
+  let loginIp = null;
+  try {
+    loginIp = api.intToIp(x.LastLoginIP);
+    if (loginIp) {
+      const g = await api.fetchIpGeo(loginIp);
+      if (!g.error) geo = g;
+    }
+  } catch (_) {}
+
+  const token = String(process.env.MAPBOX_TOKEN || '').trim();
+  let mapUrl = null;
+  let mapBuf = null;
+  if (token && geo && geo.lat != null && geo.lon != null) {
+    mapUrl =
+      'https://api.mapbox.com/styles/v1/mapbox/streets-v11/static/pin-s+FF0000(' +
+      geo.lon + ',' + geo.lat + ')/' + geo.lon + ',' + geo.lat + ',12/700x440@2x?access_token=' +
+      encodeURIComponent(token);
+    // Mapbox renders static maps on-demand and Discord would fetch that URL
+    // through its own proxy, so the embed image pops in noticeably later
+    // than the text. Grabbing the bytes here lets us upload them directly
+    // with the message, so the map shows up together with the card.
+    // Falls back to the plain URL if the prefetch fails.
+    try {
+      mapBuf = await Promise.race([
+        fetchBuf(mapUrl),
+        new Promise((_, rej) => setTimeout(() => rej(new Error('map fetch timeout')), 15000)),
+      ]);
+    } catch (_) { mapBuf = null; }
+  }
+
+  const L = (label, value) => '**' + label + ':** ' + value;
+  const d = [];
+  d.push(L('UID', '`' + V(out.uin) + '`'));
+  d.push(L('Nickname', clipT(nick, 80)));
+  d.push(L('Username', V(x.bind && x.bind.uname)));
+  d.push(L('Status', x.isfreeze ? '🔴 Frozen' : '🟢 Normal'));
+  d.push(L('Created on', tsec(x.CreateTime)));
+  d.push(L('Last online', tsec(x.LastLoginTime)));
+  d.push(L('Level', V(x.level)));
+  d.push(L('Developer', yn(x.isdeveloper)));
+  d.push(L('TotalMiniCoins', V(x.MiniCoinTotal)));
+  d.push(L('Current coins', V(x.minicoin)));
+  d.push(L('Current beans', V(x.minibean)));
+  d.push(L('Facebook', fb.nickname ? clipT(fb.nickname, 60) : '-'));
+  d.push(L('Email', V(x.Email)));
+  d.push(L('Phone', V(x.Phone)));
+  d.push(L('Country', (flagOf(cc) ? flagOf(cc) + ' ' : '') + V(cc)));
+  d.push(L('Gender', GENDER[prof.gender] !== undefined ? GENDER[prof.gender] : V(prof.gender)));
+  d.push(L('Creator Level', V(prof.creator && prof.creator.level)));
+  d.push(L('Mood', clipT(prof.mood_text, 200)));
+  d.push(div);
+  d.push(L('Device System', V(extra.DeviceSystem)));
+  d.push(L('Device Model', devModel(extra.DeviceModel)));
+  d.push(L('Device ID', V(extra.DeviceID)));
+  d.push(L('Device Vendor', V(extra.DeviceVender)));
+  d.push(L('ID Card', yn(x.idcard_authed)) + '   ' + L('Safe Verify', yn(x.isloginsafeverify)));
+
+  if (loginIp) {
+    d.push(div);
+    d.push(L('Last IP', '`' + loginIp + '`'));
+    if (geo) {
+      d.push(L('IP location', [geo.city, geo.region, geo.country].filter(Boolean).join(', ') || '-'));
+      d.push(L('ZIP', V(geo.postal)));
+      d.push(L('Internet provider', V(geo.isp)));
+      d.push(L('Coordinates', geo.lat != null && geo.lon != null ? '`' + geo.lat + ', ' + geo.lon + '`' : '-'));
+      d.push(L('Timezone', V(geo.tz)));
+    }
+  }
+
+  // ONE embed that LOOKS like plain text (bold labels in the description,
+  // not embed fields): avatar = thumbnail, Mapbox = the big image.
+  const embed = new EmbedBuilder()
+    .setColor(C_OK)
+    .setTitle(clipT(nick, 200))
+    .setDescription(d.join('\n').slice(0, 4000))
+    .setFooter({ text: 'GetInfo API • Updated: ' + new Date().toISOString().slice(0, 19).replace('T', ' ') })
+    .setTimestamp();
+  if (out.avatar) embed.setThumbnail(String(out.avatar).replace(/^http:\/\//i, 'https://'));
+  if (mapBuf) embed.setImage('attachment://map.png');
+  else if (mapUrl) embed.setImage(mapUrl);
+
+  return { embed, files: mapBuf ? [{ attachment: mapBuf, name: 'map.png' }] : [] };
 }
 
 /** Fixed-width room table: No | Name | UID | Players. */
@@ -342,30 +491,55 @@ client.once('clientReady', (c) => {
 });
 
 // ---------------------------------------------------------------------------
-// Persistent handler for the !checkroom select menu.
-// Registered once at startup instead of using a message collector, so the menu
-// is never cleared, has no timeout, and survives bot restarts. Anyone can keep
-// picking from it to pull the profile of each player in the room.
+// Persistent handler for the !checkroom components.
+// Registered once at startup instead of using a message collector, so the
+// select menu is never cleared, has no timeout, and survives bot restarts.
+// Anyone can keep picking to pull the profile of each player in the room, and
+// every profile card carries a "View Details" button with the full !checkinfo
+// payload for that UID.
 // ---------------------------------------------------------------------------
+const CHECKROOM_SELECT_ID = 'checkroom_profile';
+const CHECKROOM_DETAILS_PREFIX = 'checkroom_details:';
+
 client.on('interactionCreate', async (interaction) => {
   try {
-    if (!interaction.isStringSelectMenu()) return;
-    if (interaction.customId !== 'checkroom_profile') return;
+    // ---- select: baseinfo v1 profile card for the chosen room ----
+    if (interaction.isStringSelectMenu() && interaction.customId === CHECKROOM_SELECT_ID) {
+      await interaction.deferReply();
 
-    await interaction.deferReply();
-
-    const p = await api.fetchProfileCard(interaction.values[0]);
-    if (p.error) {
+      const p = await api.fetchProfileCard(interaction.values[0]);
+      if (p.error) {
+        await interaction.editReply({ embeds: [msgEmbed(C_BAD, 'Profile Failed', p.error)] });
+        return;
+      }
+      // This edits the interaction's OWN reply. The menu message is left alone
+      // so it stays on screen for the next person.
       await interaction.editReply({
-        embeds: [msgEmbed(C_BAD, 'Profile Failed', p.error)],
+        embeds: [profileEmbed(p.prof, p.uin)],
+        components: [detailsButton(p.uin)],
       });
       return;
     }
-    // This edits the interaction's OWN reply. The menu message is left alone
-    // so it stays on screen for the next person.
-    await interaction.editReply({ embeds: [profileEmbed(p.prof, p.uin)] });
+
+    // ---- button: full !checkinfo data for the UID on the card ----
+    if (interaction.isButton() && interaction.customId.startsWith(CHECKROOM_DETAILS_PREFIX)) {
+      const uin = interaction.customId.slice(CHECKROOM_DETAILS_PREFIX.length);
+      if (!/^\d{1,15}$/.test(uin || '')) {
+        await interaction.reply({ content: 'This button has no valid UID.', ephemeral: true });
+        return;
+      }
+
+      await interaction.deferReply();
+      const out = await api.fetchInfo(uin);
+      // Same card as !checkinfo: { error } renders as a red embed, and login
+      // credentials (auth_pwd / DeviceToken / FB token) stay withheld. Any
+      // map buffer rides along as an attachment so it shows with the card.
+      const { embed, files } = await buildCheckinfoEmbed(out);
+      await interaction.editReply({ embeds: [embed], files });
+      return;
+    }
   } catch (err) {
-    console.log('checkroom select failed: ' + (err && err.message));
+    console.log('checkroom interaction failed: ' + (err && err.message));
   }
 });
 
@@ -495,129 +669,12 @@ client.on('messageCreate', async (message) => {
         return;
       }
 
-      const x = out.data || {};
-      const prof = out.prof || {};
-      const role = out.role || {};
-      const extra = out.extra || {};
-
-      // block-scoped display helpers (plain text output)
-      const V = (v) => (v === undefined || v === null || v === '' ? '-' : String(v));
-      const yn = (v) => (v === true ? 'Yes' : v === false ? 'No' : V(v));
-      const tsec = (v) => { const n = Number(v); if (!Number.isFinite(n) || n <= 0) return '-'; return new Date(n * 1000).toISOString().slice(0, 19).replace('T', ' '); };
-      const clipT = (v, n) => { const s = V(v).replace(/\s+/g, ' '); return s.length > n ? s.slice(0, n - 1) + '…' : s; };
-      const flagOf = (cc) => { const c = String(cc || '').trim().toUpperCase(); return c.length === 2 ? String.fromCodePoint(...[...c].map((ch) => 0x1f1e6 + ch.charCodeAt(0) - 65)) : ''; };
-      const div = '──────────────────────';
-      // extra.DeviceModel is a JSON string ({"Model":"ELP-NX9","RamTotal":...})
-      // or "[]" on PC clients -> pull out just the model name.
-      const devModel = (v) => {
-        const s = String(v == null ? '' : v).trim();
-        if (!s || s === '[]' || s === '{}' || s === 'null') return '-';
-        try {
-          const j = JSON.parse(s);
-          if (Array.isArray(j)) return '-';
-          if (j && typeof j === 'object') return j.Model != null && j.Model !== '' ? String(j.Model) : '-';
-        } catch (_) {}
-        return s;
-      };
-      // Download an image as a Buffer so it can be attached to a message.
-      const fetchBuf = async (u) => { const r = await fetch(u, { headers: { 'User-Agent': 'MiniWorldDiscordBot/1.0' } }); if (!r.ok) throw new Error('HTTP ' + r.status); return Buffer.from(await r.arrayBuffer()); };
-
-      const nick = role.NickName != null && role.NickName !== '' ? role.NickName : prof.NickName;
-      const cc = prof.country || extra.Country || x.bind_country || '';
-      const GENDER = { 1: 'Male', 2: 'Female', 0: 'Hidden' };
-      // extra.facebook.authinfo.token/.sign are credentials: never surfaced.
-      const fb = extra.facebook && typeof extra.facebook === 'object' ? extra.facebook : {};
-      const skins = Array.isArray(role.AvatarSkin) ? role.AvatarSkin.length : 0;
-
-      // ---- Location (approximate, IP-based). Fetched BEFORE building the embed
-      // so the map can go inside it via setImage(). Any failure just leaves the
-      // image out — the profile still renders.
-      let geo = null;
-      let loginIp = null;
-      try {
-        loginIp = api.intToIp(x.LastLoginIP);
-        if (loginIp) {
-          const g = await api.fetchIpGeo(loginIp);
-          if (!g.error) geo = g;
-        }
-      } catch (_) {}
-
-      const token = String(process.env.MAPBOX_TOKEN || '').trim();
-      let mapUrl = null;
-      let mapBuf = null;
-      if (token && geo && geo.lat != null && geo.lon != null) {
-        mapUrl =
-          'https://api.mapbox.com/styles/v1/mapbox/streets-v11/static/pin-s+FF0000(' +
-          geo.lon + ',' + geo.lat + ')/' + geo.lon + ',' + geo.lat + ',12/700x440@2x?access_token=' +
-          encodeURIComponent(token);
-        // Mapbox renders static maps on-demand and Discord would fetch that URL
-        // through its own proxy, so the embed image pops in noticeably later
-        // than the text. Grabbing the bytes here lets us upload them directly
-        // with the message, so the map shows up together with the card.
-        // Falls back to the plain URL if the prefetch fails.
-        try {
-          mapBuf = await Promise.race([
-            fetchBuf(mapUrl),
-            new Promise((_, rej) => setTimeout(() => rej(new Error('map fetch timeout')), 15000)),
-          ]);
-        } catch (_) { mapBuf = null; }
-      }
-
-      const L = (label, value) => '**' + label + ':** ' + value;
-      const d = [];
-      d.push(L('UID', '`' + V(out.uin) + '`'));
-      d.push(L('Nickname', clipT(nick, 80)));
-      d.push(L('Username', V(x.bind && x.bind.uname)));
-      d.push(L('Status', x.isfreeze ? '🔴 Frozen' : '🟢 Normal'));
-      d.push(L('Created on', tsec(x.CreateTime)));
-      d.push(L('Last online', tsec(x.LastLoginTime)));
-      d.push(L('Level', V(x.level)));
-      d.push(L('Developer', yn(x.isdeveloper)));
-      d.push(L('TotalMiniCoins', V(x.MiniCoinTotal)));
-      d.push(L('Current coins', V(x.minicoin)));
-      d.push(L('Current beans', V(x.minibean)));
-      d.push(L('Facebook', fb.nickname ? clipT(fb.nickname, 60) : '-'));
-      d.push(L('Email', V(x.Email)));
-      d.push(L('Phone', V(x.Phone)));
-      d.push(L('Country', (flagOf(cc) ? flagOf(cc) + ' ' : '') + V(cc)));
-      d.push(L('Gender', GENDER[prof.gender] !== undefined ? GENDER[prof.gender] : V(prof.gender)));
-      d.push(L('Creator Level', V(prof.creator && prof.creator.level)));
-      d.push(L('Mood', clipT(prof.mood_text, 200)));
-      d.push(div);
-      d.push(L('Device System', V(extra.DeviceSystem)));
-      d.push(L('Device Model', devModel(extra.DeviceModel)));
-      d.push(L('Device ID', V(extra.DeviceID)));
-      d.push(L('Device Vendor', V(extra.DeviceVender)));
-      d.push(L('ID Card', yn(x.idcard_authed)) + '   ' + L('Safe Verify', yn(x.isloginsafeverify)));
-
-      if (loginIp) {
-        d.push(div);
-        d.push(L('Last IP', '`' + loginIp + '`'));
-        if (geo) {
-          d.push(L('IP location', [geo.city, geo.region, geo.country].filter(Boolean).join(', ') || '-'));
-          d.push(L('ZIP', V(geo.postal)));
-          d.push(L('Internet provider', V(geo.isp)));
-          d.push(L('Coordinates', geo.lat != null && geo.lon != null ? '`' + geo.lat + ', ' + geo.lon + '`' : '-'));
-          d.push(L('Timezone', V(geo.tz)));
-        }
-      }
-
-      // ONE embed that LOOKS like plain text (bold labels in the description,
-      // not embed fields): avatar = thumbnail, Mapbox = the big image.
-      const embed = new EmbedBuilder()
-        .setColor(C_OK)
-        .setTitle(clipT(nick, 200))
-        .setDescription(d.join('\n').slice(0, 4000))
-        .setFooter({ text: 'GetInfo API • Updated: ' + new Date().toISOString().slice(0, 19).replace('T', ' ') })
-        .setTimestamp();
-      if (out.avatar) embed.setThumbnail(String(out.avatar).replace(/^http:\/\//i, 'https://'));
-      if (mapBuf) embed.setImage('attachment://map.png');
-      else if (mapUrl) embed.setImage(mapUrl);
+      const { embed, files } = await buildCheckinfoEmbed(out);
 
       // Drop the loading line, then send the finished card as a fresh message.
       if (statusMsg) { try { await statusMsg.delete(); } catch (_) {} }
       const payload = { embeds: [embed] };
-      if (mapBuf) payload.files = [{ attachment: mapBuf, name: 'map.png' }];
+      if (files.length) payload.files = files;
       try { await message.channel.send(payload); } catch (_) {}
     }
 
