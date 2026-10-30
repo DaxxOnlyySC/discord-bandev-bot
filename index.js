@@ -342,6 +342,34 @@ client.once('clientReady', (c) => {
 });
 
 // ---------------------------------------------------------------------------
+// Persistent handler for the !checkroom select menu.
+// Registered once at startup instead of using a message collector, so the menu
+// is never cleared, has no timeout, and survives bot restarts. Anyone can keep
+// picking from it to pull the profile of each player in the room.
+// ---------------------------------------------------------------------------
+client.on('interactionCreate', async (interaction) => {
+  try {
+    if (!interaction.isStringSelectMenu()) return;
+    if (interaction.customId !== 'checkroom_profile') return;
+
+    await interaction.deferReply();
+
+    const p = await api.fetchProfileCard(interaction.values[0]);
+    if (p.error) {
+      await interaction.editReply({
+        embeds: [msgEmbed(C_BAD, 'Profile Failed', p.error)],
+      });
+      return;
+    }
+    // This edits the interaction's OWN reply. The menu message is left alone
+    // so it stays on screen for the next person.
+    await interaction.editReply({ embeds: [profileEmbed(p.prof, p.uin)] });
+  } catch (err) {
+    console.log('checkroom select failed: ' + (err && err.message));
+  }
+});
+
+// ---------------------------------------------------------------------------
 // Command handling (all embeds; bot sends NEW messages, never reply/mention)
 // ---------------------------------------------------------------------------
 client.on('messageCreate', async (message) => {
@@ -431,37 +459,11 @@ client.on('messageCreate', async (message) => {
           .addOptions(options)
       );
 
-      const sent = await message.channel.send({ embeds: [e], components: [row] });
+      // No collector here. The select menu is served by the persistent
+      // interactionCreate handler, so it is never cleared and anyone can
+      // keep picking from it to pull the profile of every player in the room.
+      await message.channel.send({ embeds: [e], components: [row] });
       if (loading) { try { await loading.delete(); } catch (_) {} }
-
-      // Only the command author may pick, so randoms can't drive the menu.
-      const collector = sent.createMessageComponentCollector({ time: 5 * 60 * 1000 });
-
-      collector.on('collect', async (i) => {
-        if (i.user.id !== message.author.id) {
-          try {
-            await i.reply({
-              content: 'Only <@' + message.author.id + '> can use this menu.',
-              ephemeral: true,
-            });
-          } catch (_) {}
-          return;
-        }
-
-        try { await i.deferReply(); } catch (_) { return; }
-
-        const p = await api.fetchProfileCard(i.values[0]);
-        if (p.error) {
-          try { await i.editReply({ embeds: [msgEmbed(C_BAD, 'Profile Failed', p.error)], components: [] }); } catch (_) {}
-          return;
-        }
-        try { await i.editReply({ embeds: [profileEmbed(p.prof, p.uin)], components: [] }); } catch (_) {}
-        collector.stop();
-      });
-
-      collector.on('end', async () => {
-        try { await sent.edit({ components: [] }); } catch (_) {}
-      });
       return;
     }
 
