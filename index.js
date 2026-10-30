@@ -32,6 +32,13 @@ const C_OK = 0x2ecc71;
 const C_BAD = 0xe74c3c;
 const C_ALERT = 0xe67e22;
 
+// !checkroom room lists (each is a worker returning {map_type, prinum, roomlist}).
+// `label` is only the fallback title while a list has no rooms.
+const ROOM_SOURCES = {
+  bts: { url: 'https://miniworld-api.daxtercarl1202.workers.dev/', label: 'Back To School [2.0]' },
+  city2: { url: 'https://zengincheckroom.daxterrantares.workers.dev/', label: 'City 2' },
+};
+
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -356,7 +363,7 @@ client.on('messageCreate', async (message) => {
             '`!unbandev <UID>` — Remove a UID from the bandev list. Only the original requester (or the owner) can unban.\n' +
             '`!bandevlist` — List active bans with player, requester, and ban time.\n' +
             '`!checkinfo <UID>` — Full account info + approximate IP location with a map.\n' +
-            '`!checkroom` — Active Back To School rooms; pick one to view its host profile.\n' +
+            '`!checkroom [bts|city2]` — Active rooms; pick one to view its host profile.\n' +
             '`!debug` — Scheduler status.\n' +
             '`!help` — Show this message.\n\n' +
             '_A UID already on the list cannot be banned again._'
@@ -365,14 +372,31 @@ client.on('messageCreate', async (message) => {
       return;
     }
 
-    // ---- !checkroom : list Back To School rooms, pick one to view its host profile
+    // ---- !checkroom [bts|city2] : list rooms, pick one to view its host profile
     if (cmd === 'checkroom' || cmd === 'room' || cmd === 'rooms') {
+      const srcKey = (args[0] || 'bts').toLowerCase();
+      const src = ROOM_SOURCES[srcKey];
+      if (!src) {
+        const list = Object.keys(ROOM_SOURCES)
+          .map((k) => '`' + PREFIX + 'checkroom ' + k + '` — ' + ROOM_SOURCES[k].label)
+          .join('\n');
+        await respond(
+          message,
+          msgEmbed(
+            C_BAD,
+            'Unknown Room List',
+            'Usage: `' + PREFIX + 'checkroom [list]`\n\nAvailable:\n' + list
+          )
+        );
+        return;
+      }
+
       let loading = null;
       try {
-        loading = await message.channel.send('⏳ Fetching active rooms...');
+        loading = await message.channel.send('⏳ Fetching active rooms (' + srcKey + ')...');
       } catch (_) {}
 
-      const out = await api.fetchRooms();
+      const out = await api.fetchRooms(src.url);
       if (out.error) {
         if (loading) { try { await loading.edit('❌ ' + out.error); } catch (_) {} }
         else await respond(message, msgEmbed(C_BAD, 'Room Check Failed', out.error));
@@ -380,10 +404,11 @@ client.on('messageCreate', async (message) => {
       }
 
       const rooms = out.rooms || [];
-      const mapName = out.roomName || 'Back To School [2.0]';
+      const mapName = out.roomName || src.label;
       if (!rooms.length) {
-        if (loading) { try { await loading.edit('No active rooms right now.'); } catch (_) {} }
-        else await respond(message, msgEmbed(C_INFO, mapName, 'No active rooms right now.'));
+        const empty = 'No active rooms right now (' + srcKey + ').';
+        if (loading) { try { await loading.edit(empty); } catch (_) {} }
+        else await respond(message, msgEmbed(C_INFO, mapName, empty));
         return;
       }
 
